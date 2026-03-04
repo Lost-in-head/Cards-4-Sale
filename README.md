@@ -9,12 +9,12 @@ Upload a photo of an item → AI analyzes it → searches eBay for similar listi
 ## Features (in order of building)
 
 1. ✅ Upload/capture photo
-2. 🔄 Analyze image with OpenAI Vision (extract brand, condition, features)
-3. 🔍 Search eBay for similar items
-4. 💰 Calculate suggested price (median of comparable listings)
-5. 📝 Generate listing title & description
-6. 📦 Create draft eBay inventory item
-7. ✨ (Optional) Auto-publish to eBay
+2. ✅ Analyze image with OpenAI Vision (extract brand, condition, features)
+3. ✅ Search eBay for similar items
+4. ✅ Calculate suggested price (median of comparable listings)
+5. ✅ Generate listing title & description
+6. ✅ Create draft eBay inventory item
+7. 🔄 (Optional) Auto-publish to eBay
 
 ## Tech Stack
 
@@ -23,45 +23,88 @@ Upload a photo of an item → AI analyzes it → searches eBay for similar listi
 - **eBay APIs**: Finding API + Sell Inventory API
 - **Frontend**: (TBD - web or mobile)
 
-## Current Status: MOCK MODE ✨
+## Current Status: FULLY CONFIGURED ✅
 
-You can run the app RIGHT NOW without API keys! We use realistic mock data for testing.
+Both OpenAI Vision and eBay APIs are configured and working!
 
 ### Getting Started
 
-#### Quick Start - Web UI (Recommended!)
+#### 1. Clone and Setup Environment
 
 ```bash
-bash run_web.sh
-# Open http://localhost:5000 in your browser
-# Upload a photo → See instant listing!
+git clone https://github.com/Lost-in-head/VSC-projects-with-git.git
+cd VSC-projects-with-git
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-**Features:**
+#### 2. Configure API Keys
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and add your credentials:
+
+```bash
+# OpenAI API key (required for image analysis)
+OPENAI_API_KEY=sk-your-key-here
+
+# eBay developer credentials (get from https://developer.ebay.com)
+EBAY_CLIENT_ID=your-client-id
+EBAY_CLIENT_SECRET=your-client-secret
+
+# Set to False to use real APIs
+USE_OPENAI_MOCK=False
+USE_EBAY_MOCK=False
+
+# Keep True for sandbox testing
+EBAY_SANDBOX=True
+```
+
+#### 3. Run the App
+
+**Option A: Web UI (Recommended)**
+
+```bash
+source venv/bin/activate
+bash run_web.sh
+# Or manually: python -m flask --app src.app run --debug
+```
+
+Open <http://localhost:5000> in your browser.
+
+**Option B: Command Line**
+
+```bash
+source venv/bin/activate
+python -m src.main
+```
+
+### Quick Start - Mock Mode (No API Keys)
+
+Want to try without API keys? Set these in `.env`:
+
+```bash
+USE_OPENAI_MOCK=True
+USE_EBAY_MOCK=True
+```
+
+Then run normally — you'll see realistic demo data.
+
+### Web UI Features
 
 - 📷 Click or drag-drop photo upload
 - ✨ Beautiful, modern interface
 - 💰 See suggested price instantly
 - 🛒 View comparable eBay listings
 - 📋 Copy listing JSON to clipboard
-
-#### Quick Start - Command Line (No Setup Needed!)
-
-```bash
-cd /path/to/VSC-projects-with-git
-pip install -r requirements.txt
-python src/main.py
-```
-
-That's it! You'll see realistic demo data flowing through the pipeline.
-
-#### With Real API Keys (When Ready)
-
-1. Copy `.env.example` to `.env`
-2. Add your OpenAI API key
-3. Add your eBay credentials
-4. Set `USE_OPENAI_MOCK=False` and `USE_EBAY_MOCK=False` in `.env`
-5. Run: `python src/main.py`
+- 🚀 Batch processing (upload multiple photos)
 
 ## Project Structure
 
@@ -140,11 +183,12 @@ That's it! You'll see realistic demo data flowing through the pipeline.
 - ✅ Beautiful, responsive design
 - ✅ Copy-to-clipboard for listing JSON
 
-### Phase 3: Real APIs (Next)
+### Phase 3: Real APIs ✅ COMPLETE
 
-- Add your OpenAI key → Enable real image analysis
-- Add eBay credentials → Enable real product search
-- Implement error handling
+- ✅ OpenAI Vision API configured and working
+- ✅ eBay Finding API configured and working
+- ✅ eBay OAuth authentication working
+- ✅ Error handling with mock fallbacks
 
 ### Phase 4: Publishing
 
@@ -154,59 +198,62 @@ That's it! You'll see realistic demo data flowing through the pipeline.
 
 ## Useful Commands
 
-### Run the Web UI (Recommended!)
-
 ```bash
-bash run_web.sh
-```
+# Activate virtual environment (required before running)
+source venv/bin/activate
 
-Then open <http://localhost:5000> in your browser! 🎉
+# Run Web UI
+python -m flask --app src.app run --debug
+# Or: bash run_web.sh
 
-### Run with mock data (command line)
+# Run CLI pipeline
+python -m src.main
 
-```bash
-python src/main.py
-```
+# Run with debug output
+DEBUG=True python -m src.main
 
-### Run with debug output
-
-```bash
-DEBUG=True python src/main.py
-```
-
-### Install dependencies
-
-```bash
+# Install/update dependencies
 pip install -r requirements.txt
-```
 
-### Set up environment
-
-```bash
-cp .env.example .env
-# Edit .env with your keys (when you have them)
+# Verify eBay credentials
+python -c "from src.api.ebay_client import get_ebay_token; print('OK:', get_ebay_token()[:20])"
 ```
 
 ## Testing the Pipeline
 
-### Test 1: No Setup Required
+### Test 1: Quick Smoke Test
 
-- Run `python src/main.py`
-- You'll see realistic mock data flowing through
-- The pipeline outputs a complete eBay listing JSON
+```bash
+source venv/bin/activate
+python -m src.main
+```
+
+You'll see the full pipeline: image analysis → eBay search → price suggestion → listing JSON.
 
 ### Test 2: With Real Image
 
-- Place any `.jpg` file at project root and name it `sample_item.jpg`
-- Run `python src/main.py`
-- (In mock mode, it still uses demo analysis)
+```bash
+# Place any .jpg file at project root named sample_item.jpg
+python -m src.main
+```
 
-### Test 3: With OpenAI Key
+### Test 3: Web UI Upload
 
-- Add `OPENAI_API_KEY=sk-...` to `.env`
-- Set `USE_OPENAI_MOCK=False` in `.env`
-- Run `python src/main.py`
-- Now you'll see REAL image analysis!
+```bash
+python -m flask --app src.app run --debug
+# Open http://localhost:5000
+# Upload any photo and see real-time listing generation
+```
+
+### Test 4: Verify API Credentials
+
+```bash
+# Test eBay
+python -c "from src.api.ebay_client import search_ebay; print(search_ebay('laptop', 3))"
+
+# Test OpenAI (requires an image)
+python -c "from src.api.openai_client import describe_image; print(describe_image('sample_item.jpg'))"
+```
 
 ## API Key Setup (When Ready)
 
@@ -253,4 +300,4 @@ A: Check `.env` - make sure `USE_OPENAI_MOCK` and `USE_EBAY_MOCK` are set to `Fa
 
 ---
 
-**Status**: Ready for development! Mock mode works, real APIs coming soon. 🚀
+**Status**: Production-ready! Both OpenAI Vision and eBay APIs configured and working. 🚀
