@@ -41,4 +41,42 @@ Thumbs.db
 uploads/
 temp/
 *.log
-sample_item.jpg
+sample_item.
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+!.env.template
+!.env.sample
+
+# Flask instance config (often contains secrets)
+instance/
+!instance/.gitignore
+
+# Local config overrides (do not commit)
+config.local.py
+config.local.*
+settings.local.py
+settings.local.*
+local_settings.py
+secrets.py
+*.secrets.*
+credentials.*
+*.credentials.*
+
+# Databases (do not commit)
+*.sqlite
+*.sqlite3
+listings.db
+
+# Personal / sensitive
+*.code-workspace
+lumo*
+github/
+Desktop.code-workspace
+
+# Keep these (good)
+!tools/smoke_test.py
+
+
