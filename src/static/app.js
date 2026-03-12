@@ -27,6 +27,13 @@ const retryBtn = document.getElementById('retryBtn');
 let selectedFiles = [];
 let processedResults = [];
 
+
+function setSectionVisibility(section, visible, displayValue = 'block') {
+      section.classList.toggle('hidden', !visible);
+      section.style.display = visible ? displayValue : 'none';
+}
+
+
 // Tab Management
 const tabBtns = document.querySelectorAll('.tab-btn');
 const tabContents = document.querySelectorAll('.tab-content');
@@ -46,11 +53,13 @@ function switchTab(tabName, clickedBtn = null) {
       tabContents.forEach(content => {
             content.style.display = 'none';
             content.classList.remove('active');
+            content.classList.add('hidden');
       });
 
       const activeTab = document.getElementById(`${tabName}Tab`);
       activeTab.style.display = 'block';
       activeTab.classList.add('active');
+      activeTab.classList.remove('hidden');
 
       // Load dashboard when switching to it
       if (tabName === 'dashboard') {
@@ -258,9 +267,9 @@ function showPreview() {
             reader.readAsDataURL(file);
       });
 
-      previewSection.style.display = 'block';
+      setSectionVisibility(previewSection, true);
       uploadBox.style.display = 'none';
-      errorSection.style.display = 'none';
+      setSectionVisibility(errorSection, false);
 }
 
 function removeFile(index) {
@@ -275,9 +284,9 @@ function removeFile(index) {
 function clearPreview() {
       selectedFiles = [];
       photoInput.value = '';
-      previewSection.style.display = 'none';
+      setSectionVisibility(previewSection, false);
       uploadBox.style.display = 'block';
-      errorSection.style.display = 'none';
+      setSectionVisibility(errorSection, false);
 }
 
 async function submitForm() {
@@ -288,10 +297,10 @@ async function submitForm() {
 
       try {
             // Show loading state
-            previewSection.style.display = 'none';
-            loadingSection.style.display = 'block';
-            resultsSection.style.display = 'none';
-            errorSection.style.display = 'none';
+            setSectionVisibility(previewSection, false);
+            setSectionVisibility(loadingSection, true);
+            setSectionVisibility(resultsSection, false);
+            setSectionVisibility(errorSection, false);
 
             processedResults = [];
             const totalFiles = selectedFiles.length;
@@ -338,8 +347,8 @@ async function submitForm() {
 
             // Display results
             displayBatchResults();
-            loadingSection.style.display = 'none';
-            resultsSection.style.display = 'block';
+            setSectionVisibility(loadingSection, false);
+            setSectionVisibility(resultsSection, true);
 
       } catch (error) {
             console.error('Error:', error);
@@ -483,16 +492,16 @@ function downloadAllListings() {
 
 function showError(message) {
       errorMessage.textContent = message;
-      errorSection.style.display = 'block';
-      loadingSection.style.display = 'none';
-      previewSection.style.display = 'none';
-      resultsSection.style.display = 'none';
+      setSectionVisibility(errorSection, true);
+      setSectionVisibility(loadingSection, false);
+      setSectionVisibility(previewSection, false);
+      setSectionVisibility(resultsSection, false);
 }
 
 function resetForm() {
       clearPreview();
-      resultsSection.style.display = 'none';
-      loadingSection.style.display = 'none';
+      setSectionVisibility(resultsSection, false);
+      setSectionVisibility(loadingSection, false);
       processedResults = [];
       progressFill.style.width = '0%';
 }

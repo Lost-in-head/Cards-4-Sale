@@ -76,7 +76,7 @@ def search_ebay_mock(query: str, limit: int = 5) -> List[Dict]:
         results.append({
             "title": entry["title"],
             "price": entry["price"],
-            "url": f"https://www.ebay.com/itm/mock-{i}"
+            "url": f"https://sandbox.ebay.com/itm/mock-{i}"
         })
     
     return results
