@@ -81,3 +81,42 @@ def test_process_listing_multi_card_photo(monkeypatch):
     assert result["mode"] == "multi_card"
     assert result["cards_detected"] == 2
     assert len(result["card_results"]) == 2
+
+
+def test_process_listing_high_value_flag(monkeypatch):
+    monkeypatch.setattr('src.app.describe_image', lambda _p: {
+        'brand': 'Topps',
+        'model': 'Premium Card',
+        'category': 'Sports Trading Cards',
+        'condition': 'Near Mint',
+        'features': ['Serial numbered'],
+        'grading_notes': ['Minor corner whitening'],
+    })
+    monkeypatch.setattr('src.app.search_ebay', lambda _q, limit=8: [{'title': 'x', 'price': 35.0, 'url': 'u'}])
+    monkeypatch.setattr('src.app.suggest_price', lambda _l: 35.0)
+    monkeypatch.setattr('src.app.build_listing_payload', lambda title, description, price, condition='USED_GOOD': {'product': {'title': title}, 'price': {'value': str(price)}, 'condition': condition})
+    monkeypatch.setattr('src.app.save_listing', lambda **kwargs: 1)
+
+    result = process_listing('premium.jpg', 'premium.jpg')
+    assert result['success'] is True
+    assert result['is_high_value'] is True
+    assert result['high_value_threshold'] == 20.0
+
+
+def test_process_listing_low_value_flag(monkeypatch):
+    monkeypatch.setattr('src.app.describe_image', lambda _p: {
+        'brand': 'Topps',
+        'model': 'Common Card',
+        'category': 'Sports Trading Cards',
+        'condition': 'Good',
+        'features': ['Base card'],
+        'grading_notes': ['Visible edge wear'],
+    })
+    monkeypatch.setattr('src.app.search_ebay', lambda _q, limit=8: [{'title': 'x', 'price': 12.0, 'url': 'u'}])
+    monkeypatch.setattr('src.app.suggest_price', lambda _l: 12.0)
+    monkeypatch.setattr('src.app.build_listing_payload', lambda title, description, price, condition='USED_GOOD': {'product': {'title': title}, 'price': {'value': str(price)}, 'condition': condition})
+    monkeypatch.setattr('src.app.save_listing', lambda **kwargs: 1)
+
+    result = process_listing('cheap.jpg', 'cheap.jpg')
+    assert result['success'] is True
+    assert result['is_high_value'] is False

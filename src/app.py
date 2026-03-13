@@ -13,6 +13,8 @@ from src.api.openai_client import describe_image
 from src.api.ebay_client import search_ebay, suggest_price, build_listing_payload, publish_listing
 from src.database import init_db, save_listing, get_all_listings, get_listing, update_listing_status, delete_listing, get_stats, record_publish_result
 
+HIGH_VALUE_THRESHOLD = 20.0
+
 
 def create_app():
     """Create and configure Flask application"""
@@ -209,6 +211,7 @@ def generate_listing_from_analysis(analysis, filename):
         'analysis': analysis,
         'comparable_listings': listings,
         'suggested_price': suggested_price,
+        'is_high_value': suggested_price >= HIGH_VALUE_THRESHOLD,
         'payload': payload,
     }
 
@@ -239,6 +242,8 @@ def process_listing(image_path, filename='unknown.jpg'):
                 'comparable_listings': result['comparable_listings'],
                 'suggested_price': result['suggested_price'],
                 'payload': result['payload'],
+                'is_high_value': result['is_high_value'],
+                'high_value_threshold': HIGH_VALUE_THRESHOLD,
                 'message': '✅ Listing generated and saved successfully!'
             }
 
@@ -247,6 +252,7 @@ def process_listing(image_path, filename='unknown.jpg'):
             'mode': 'multi_card',
             'cards_detected': len(results),
             'card_results': results,
+            'high_value_threshold': HIGH_VALUE_THRESHOLD,
             'message': f'✅ Generated {len(results)} listing drafts from one photo.'
         }
 
@@ -269,6 +275,14 @@ def format_description(analysis):
     if analysis.get('condition'):
         parts.append(f"**Condition**: {analysis['condition']}")
     
+    if analysis.get('grading_notes'):
+        notes = analysis['grading_notes']
+        if isinstance(notes, list):
+            notes_text = '\n'.join([f"• {n}" for n in notes])
+        else:
+            notes_text = str(notes)
+        parts.append(f"**Grading Notes**:\n{notes_text}")
+
     if analysis.get('features'):
         features_list = analysis['features']
         if isinstance(features_list, list):
