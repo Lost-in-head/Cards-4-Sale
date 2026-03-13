@@ -9,6 +9,7 @@ REQUIRED_IMAGE_KEYS = [
     "condition",
     "features",
     "estimated_value_range",
+    "grading_notes",
 ]
 
 
@@ -31,3 +32,23 @@ def test_describe_image_mock_supports_multi_card_shape():
     assert "cards" in result
     assert isinstance(result["cards"], list)
     assert len(result["cards"]) >= 2
+
+
+def test_describe_image_mock_filename_overrides():
+    cheap = describe_image_mock('cheap_card.jpg')
+    expensive = describe_image_mock('expensive_card.jpg')
+
+    assert 'card' in cheap['category'].lower()
+    assert isinstance(cheap['grading_notes'], list)
+    assert 'card' in expensive['category'].lower()
+
+
+def test_search_ebay_mock_supports_price_tiers_for_cards():
+    cheap = search_ebay_mock('cheap common base card', limit=5)
+    premium = search_ebay_mock('premium limited rookie auto /99', limit=5)
+
+    cheap_median = sorted([r['price'] for r in cheap])[len(cheap)//2]
+    premium_median = sorted([r['price'] for r in premium])[len(premium)//2]
+
+    assert cheap_median < 20
+    assert premium_median >= 20

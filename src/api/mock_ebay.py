@@ -48,6 +48,20 @@ def search_ebay_mock(query: str, limit: int = 5) -> List[Dict]:
             {"title": "Vacuum Cordless Handheld", "price": 450.00},
             {"title": "Digital Cordless Vacuum", "price": 500.00},
             {"title": "Wireless Vacuum Cleaner Pro", "price": 490.00},
+        ],
+        "trading_cards": [
+            {"title": "Common Base Card Lot", "price": 5.00},
+            {"title": "Rookie Card Ungraded", "price": 10.00},
+            {"title": "Parallel Insert Card", "price": 14.00},
+            {"title": "Star Rookie Card Near Mint", "price": 18.00},
+            {"title": "Serial Numbered Card", "price": 22.00},
+        ],
+        "premium_trading_cards": [
+            {"title": "Limited Rookie Auto /99", "price": 45.00},
+            {"title": "SP Parallel PSA 9", "price": 58.00},
+            {"title": "Case Hit Insert", "price": 64.00},
+            {"title": "On-Card Auto Variation", "price": 72.00},
+            {"title": "Premium Rookie Patch Auto", "price": 89.00},
         ]
     }
     
@@ -63,6 +77,12 @@ def search_ebay_mock(query: str, limit: int = 5) -> List[Dict]:
         category = "clothing"
     elif any(word in query_lower for word in ["vacuum", "cleaner"]):
         category = "vacuum"
+    elif any(word in query_lower for word in ["premium", "limited", "auto", "patch", "/99", "case hit"]):
+        category = "premium_trading_cards"
+    elif any(word in query_lower for word in ["cheap", "common", "base card", "bulk"]):
+        category = "trading_cards"
+    elif any(word in query_lower for word in ["card", "topps", "panini", "rookie", "psa"]):
+        category = "trading_cards"
     else:
         category = random.choice(list(MOCK_LISTINGS.keys()))
     
@@ -76,7 +96,7 @@ def search_ebay_mock(query: str, limit: int = 5) -> List[Dict]:
         results.append({
             "title": entry["title"],
             "price": entry["price"],
-            "url": f"https://www.ebay.com/itm/mock-{i}"
+            "url": f"https://sandbox.ebay.com/itm/mock-{i}"
         })
     
     return results

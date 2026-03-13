@@ -23,9 +23,77 @@ const submitBtn = document.getElementById('submitBtn');
 const downloadAllBtn = document.getElementById('downloadAllBtn');
 const newListingBtn = document.getElementById('newListingBtn');
 const retryBtn = document.getElementById('retryBtn');
+const connectEbayBtn = document.getElementById('connectEbayBtn');
+const ebayConnectionStatus = document.getElementById('ebayConnectionStatus');
 
 let selectedFiles = [];
 let processedResults = [];
+let ebayConnected = false;
+
+
+function setSectionVisibility(section, visible, displayValue = 'block') {
+      section.classList.toggle('hidden', !visible);
+      section.style.display = visible ? displayValue : 'none';
+}
+
+
+function updateEbayConnectionUI() {
+      if (!ebayConnectionStatus || !connectEbayBtn) return;
+      ebayConnectionStatus.textContent = ebayConnected ? 'Connected (Mock OAuth)' : 'Not Connected';
+      ebayConnectionStatus.classList.toggle('connected', ebayConnected);
+      ebayConnectionStatus.classList.toggle('disconnected', !ebayConnected);
+      connectEbayBtn.textContent = ebayConnected ? '✅ eBay Connected' : '🔐 Connect eBay';
+}
+
+function notifyHighValueCards(highValueCount) {
+      if (highValueCount <= 0) return;
+      const message = `🔥 ${highValueCount} high-value card(s) found (threshold: $20)!`;
+
+      if ('Notification' in window) {
+            if (Notification.permission === 'granted') {
+                  new Notification(message);
+                  return;
+            }
+            if (Notification.permission !== 'denied') {
+                  Notification.requestPermission().then(permission => {
+                        if (permission === 'granted') {
+                              new Notification(message);
+                        } else {
+                              alert(message);
+                        }
+                  });
+                  return;
+            }
+      }
+
+      alert(message);
+}
+
+async function listForSale(index) {
+      const result = processedResults[index];
+      if (!result || !result.success) return;
+      if (!ebayConnected) {
+            alert('Please click Connect eBay first (mock OAuth).');
+            return;
+      }
+
+      const listingId = result.data?.listing_id;
+      if (!listingId) {
+            alert('Listing ID missing for publish action.');
+            return;
+      }
+
+      try {
+            const response = await fetch(`/api/listings/${listingId}/publish`, { method: 'POST' });
+            const data = await response.json();
+            if (!response.ok) {
+                  throw new Error(data.error || 'Publish failed');
+            }
+            alert(`✅ Listed for sale! External ID: ${data.external_listing_id}`);
+      } catch (error) {
+            alert(`❌ List for Sale failed: ${error.message}`);
+      }
+}
 
 // Tab Management
 const tabBtns = document.querySelectorAll('.tab-btn');
@@ -46,11 +114,13 @@ function switchTab(tabName, clickedBtn = null) {
       tabContents.forEach(content => {
             content.style.display = 'none';
             content.classList.remove('active');
+            content.classList.add('hidden');
       });
 
       const activeTab = document.getElementById(`${tabName}Tab`);
       activeTab.style.display = 'block';
       activeTab.classList.add('active');
+      activeTab.classList.remove('hidden');
 
       // Load dashboard when switching to it
       if (tabName === 'dashboard') {
@@ -178,6 +248,13 @@ submitBtn.addEventListener('click', submitForm);
 downloadAllBtn.addEventListener('click', downloadAllListings);
 newListingBtn.addEventListener('click', resetForm);
 retryBtn.addEventListener('click', resetForm);
+if (connectEbayBtn) {
+      connectEbayBtn.addEventListener('click', () => {
+            ebayConnected = true;
+            updateEbayConnectionUI();
+            alert('✅ eBay connected successfully (mock OAuth).');
+      });
+}
 
 // File Upload Handlers
 function handleDragOver(e) {
@@ -258,9 +335,9 @@ function showPreview() {
             reader.readAsDataURL(file);
       });
 
-      previewSection.style.display = 'block';
+      setSectionVisibility(previewSection, true);
       uploadBox.style.display = 'none';
-      errorSection.style.display = 'none';
+      setSectionVisibility(errorSection, false);
 }
 
 function removeFile(index) {
@@ -275,9 +352,9 @@ function removeFile(index) {
 function clearPreview() {
       selectedFiles = [];
       photoInput.value = '';
-      previewSection.style.display = 'none';
+      setSectionVisibility(previewSection, false);
       uploadBox.style.display = 'block';
-      errorSection.style.display = 'none';
+      setSectionVisibility(errorSection, false);
 }
 
 async function submitForm() {
@@ -288,10 +365,10 @@ async function submitForm() {
 
       try {
             // Show loading state
-            previewSection.style.display = 'none';
-            loadingSection.style.display = 'block';
-            resultsSection.style.display = 'none';
-            errorSection.style.display = 'none';
+            setSectionVisibility(previewSection, false);
+            setSectionVisibility(loadingSection, true);
+            setSectionVisibility(resultsSection, false);
+            setSectionVisibility(errorSection, false);
 
             processedResults = [];
             const totalFiles = selectedFiles.length;
@@ -338,8 +415,8 @@ async function submitForm() {
 
             // Display results
             displayBatchResults();
-            loadingSection.style.display = 'none';
-            resultsSection.style.display = 'block';
+            setSectionVisibility(loadingSection, false);
+            setSectionVisibility(resultsSection, true);
 
       } catch (error) {
             console.error('Error:', error);
@@ -354,10 +431,14 @@ function updateProgress(current, total, message) {
 }
 
 function displayBatchResults() {
-      const successCount = processedResults.filter(r => r.success).length;
+      const successful = processedResults.filter(r => r.success);
+      const successCount = successful.length;
       resultCount.textContent = successCount;
 
       resultsGrid.innerHTML = '';
+
+      const highValueCount = successful.filter(r => r.data?.is_high_value === true).length;
+      notifyHighValueCards(highValueCount);
 
       processedResults.forEach((result, index) => {
             if (result.success) {
@@ -374,6 +455,7 @@ function createResultCard(data, filename, index) {
       const analysis = data.analysis;
       const listings = data.comparable_listings;
       const price = data.suggested_price;
+      const isHighValue = data.is_high_value === true;
 
       const card = document.createElement('div');
       card.className = 'result-card';
@@ -383,6 +465,18 @@ function createResultCard(data, filename, index) {
       if (analysis.features) {
             const features = Array.isArray(analysis.features) ? analysis.features : [analysis.features];
             featuresList = features.map(f => `<li>${f}</li>`).join('');
+      }
+
+      // Build grading notes
+      let gradingNotes = '';
+      if (analysis.grading_notes) {
+            const notes = Array.isArray(analysis.grading_notes) ? analysis.grading_notes : [analysis.grading_notes];
+            gradingNotes = `
+                  <div style="margin: 10px 0;">
+                        <p style="font-size: 0.85em; color: #666; margin: 0 0 6px 0;"><strong>Grading notes:</strong></p>
+                        <ul style="margin: 0; padding-left: 20px; font-size: 0.85em;">${notes.map(n => `<li>${n}</li>`).join('')}</ul>
+                  </div>
+            `;
       }
 
       // Build listings table
@@ -405,6 +499,7 @@ function createResultCard(data, filename, index) {
       }
 
       card.innerHTML = `
+            ${isHighValue ? '<div class="high-value-badge">🔥 High Value</div>' : ''}
             <h3 style="margin: 0 0 15px 0; color: #333; word-break: break-word;">
                   📷 ${filename}
             </h3>
@@ -414,12 +509,16 @@ function createResultCard(data, filename, index) {
                   <p style="margin: 4px 0; font-size: 0.85em; color: #666;">Condition: ${analysis.condition || 'Unknown'}</p>
             </div>
             ${featuresList ? `<ul style="margin: 10px 0; padding-left: 20px; font-size: 0.85em;">${featuresList}</ul>` : ''}
+            ${gradingNotes}
             <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 12px; border-radius: 8px; text-align: center; margin: 15px 0;">
                   <p style="margin: 0; font-size: 0.85em; opacity: 0.9;">Suggested Price</p>
                   <p style="margin: 4px 0; font-size: 1.4em; font-weight: bold;">$${parseFloat(price).toFixed(2)}</p>
             </div>
             ${listingsTable}
-            <button class="btn-secondary" style="width: 100%; margin-top: 12px;" onclick="copyPayload(${index})">📋 Copy Payload</button>
+            <div style="display:flex; gap:8px; margin-top:12px;">
+                  <button class="btn-secondary" style="width: 100%;" onclick="copyPayload(${index})">📋 Copy Payload</button>
+                  <button class="btn-primary" style="width: 100%;" onclick="listForSale(${index})">🛒 List for Sale</button>
+            </div>
       `;
 
       // Store payload for copying
@@ -483,16 +582,16 @@ function downloadAllListings() {
 
 function showError(message) {
       errorMessage.textContent = message;
-      errorSection.style.display = 'block';
-      loadingSection.style.display = 'none';
-      previewSection.style.display = 'none';
-      resultsSection.style.display = 'none';
+      setSectionVisibility(errorSection, true);
+      setSectionVisibility(loadingSection, false);
+      setSectionVisibility(previewSection, false);
+      setSectionVisibility(resultsSection, false);
 }
 
 function resetForm() {
       clearPreview();
-      resultsSection.style.display = 'none';
-      loadingSection.style.display = 'none';
+      setSectionVisibility(resultsSection, false);
+      setSectionVisibility(loadingSection, false);
       processedResults = [];
       progressFill.style.width = '0%';
 }
@@ -500,4 +599,5 @@ function resetForm() {
 // Auto-focus on page load
 window.addEventListener('load', () => {
       uploadBox.focus();
+      updateEbayConnectionUI();
 });

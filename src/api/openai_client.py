@@ -53,7 +53,12 @@ def describe_image(image_path: str) -> dict:
     Analyze this photo for resale listing generation.
 
     If there is ONE primary item, return JSON object with:
-    - brand, model, category, condition, features, estimated_value_range
+    - brand, model, category, condition, features, estimated_value_range, grading_notes
+
+    grading_notes must be specific and evidence-based. List visible flaws such as:
+    - Whitening on corners
+    - Surface scratches
+    - Edge wear
 
     If there are MULTIPLE trading cards visible, return:
     {
@@ -64,6 +69,7 @@ def describe_image(image_path: str) -> dict:
           "category": "Sports Trading Cards",
           "condition": "Near Mint/Good/etc",
           "features": ["feature1", "feature2"],
+          "grading_notes": ["Whitening on corners", "Surface scratches"],
           "estimated_value_range": "$X-Y",
           "player_name": "...",
           "set_name": "...",

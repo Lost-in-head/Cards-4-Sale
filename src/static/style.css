@@ -691,3 +691,40 @@ footer {
             width: 100%;
       }
 }
+.ebay-connect-row {
+      margin-top: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+}
+
+.connection-status {
+      font-size: 0.9rem;
+      font-weight: 700;
+      padding: 6px 10px;
+      border-radius: 999px;
+}
+
+.connection-status.disconnected {
+      background: #ffe9e9;
+      color: #b3261e;
+}
+
+.connection-status.connected {
+      background: #e7f7ee;
+      color: #137333;
+}
+
+.high-value-badge {
+      display: inline-block;
+      margin-bottom: 10px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #ff6f00, #ff1744);
+      color: #fff;
+      font-weight: 800;
+      font-size: 0.85rem;
+      letter-spacing: 0.2px;
+      box-shadow: 0 6px 16px rgba(255, 87, 34, 0.35);
+}
