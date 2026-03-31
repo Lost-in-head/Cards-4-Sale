@@ -3,14 +3,20 @@ Flask web application for eBay Listing Generator
 Provides a user-friendly interface to upload photos and generate listings
 """
 
+import importlib
+import logging
 import os
 import uuid
 from werkzeug.utils import secure_filename
 from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask_cors import CORS
 from src.config import UPLOAD_FOLDER, ALLOWED_EXTENSIONS
 from src.api.openai_client import describe_image
 from src.api.ebay_client import search_ebay, suggest_price, build_listing_payload, publish_listing
 from src.database import init_db, save_listing, get_all_listings, get_listing, update_listing_status, delete_listing, get_stats, record_publish_result
+import src.settings_store as settings_store
+
+logger = logging.getLogger(__name__)
 
 HIGH_VALUE_THRESHOLD = 20.0
 
@@ -18,15 +24,18 @@ HIGH_VALUE_THRESHOLD = 20.0
 def create_app():
     """Create and configure Flask application"""
     app = Flask(__name__, template_folder='templates', static_folder='static')
-    
+
+    # Enable CORS for all API routes (required for mobile/desktop WebView clients)
+    CORS(app, resources={r"/api/*": {"origins": "*"}})
+
     # Configuration
     app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
     app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
     app.config['JSON_SORT_KEYS'] = False
-    
+
     # Initialize database
     init_db()
-    
+
     # Ensure upload folder exists
     os.makedirs(UPLOAD_FOLDER, exist_ok=True)
     
@@ -153,6 +162,125 @@ def create_app():
         except FileNotFoundError:
             return jsonify({'error': 'File not found'}), 404
     
+    @app.route('/api/health')
+    def health():
+        """Health check endpoint for desktop/mobile connectivity checks"""
+        return jsonify({'status': 'ok', 'version': '1.0.0'}), 200
+
+    # ── Settings routes ───────────────────────────────────────────────────────
+
+    @app.route('/settings')
+    def settings_page():
+        """Settings UI — enter API keys and toggle mock/sandbox mode"""
+        return render_template('settings.html')
+
+    @app.route('/api/settings', methods=['GET'])
+    def get_settings():
+        """Return current settings state (secrets are masked)."""
+        import src.config as cfg
+        stored = settings_store.load_all()
+
+        def _mask(key):
+            val = stored.get(key, '')
+            if not val:
+                return ''
+            # Show first 4 chars then asterisks, e.g. sk-p***
+            visible = val[:4]
+            return visible + '*' * max(4, len(val) - 4)
+
+        return jsonify({
+            'openai_api_key_set': bool(stored.get('OPENAI_API_KEY')),
+            'openai_api_key_preview': _mask('OPENAI_API_KEY'),
+            'ebay_client_id_set': bool(stored.get('EBAY_CLIENT_ID')),
+            'ebay_client_id_preview': _mask('EBAY_CLIENT_ID'),
+            'ebay_client_secret_set': bool(stored.get('EBAY_CLIENT_SECRET')),
+            'use_openai_mock': os.environ.get('USE_OPENAI_MOCK', str(cfg.USE_OPENAI_MOCK)).lower() == 'true',
+            'use_ebay_mock': os.environ.get('USE_EBAY_MOCK', str(cfg.USE_EBAY_MOCK)).lower() == 'true',
+            'ebay_sandbox': os.environ.get('EBAY_SANDBOX', str(cfg.EBAY_SANDBOX)).lower() == 'true',
+        }), 200
+
+    @app.route('/api/settings', methods=['POST'])
+    def save_settings():
+        """
+        Save API credentials and toggle flags.
+        Reloads config and API client modules so changes take effect immediately
+        without restarting the server.
+        """
+        data = request.get_json(silent=True) or {}
+
+        # Build a settings dict from the submitted values
+        to_save = {}
+        for key in ('OPENAI_API_KEY', 'EBAY_CLIENT_ID', 'EBAY_CLIENT_SECRET'):
+            if key in data:
+                to_save[key] = data[key]
+
+        for key in ('USE_OPENAI_MOCK', 'USE_EBAY_MOCK', 'EBAY_SANDBOX'):
+            if key in data:
+                to_save[key] = 'True' if data[key] else 'False'
+
+        settings_store.save_all(to_save)
+
+        # Apply to os.environ so that reloaded modules pick up the new values
+        for key, value in to_save.items():
+            if value:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+
+        # Reload config and API client modules to apply changes live
+        import src.config as config_mod
+        import src.api.openai_client as openai_mod
+        import src.api.ebay_client as ebay_mod
+        importlib.reload(config_mod)
+        importlib.reload(openai_mod)
+        importlib.reload(ebay_mod)
+        logger.info("Settings saved and modules reloaded")
+
+        return jsonify({'success': True}), 200
+
+    @app.route('/api/settings/test-openai', methods=['POST'])
+    def test_openai():
+        """Quick connectivity test against the OpenAI API."""
+        import src.config as cfg
+        if cfg.USE_OPENAI_MOCK or not cfg.OPENAI_API_KEY:
+            return jsonify({
+                'success': True,
+                'mode': 'mock',
+                'message': 'Mock mode active — no API call made',
+            }), 200
+        try:
+            import requests as req
+            resp = req.get(
+                'https://api.openai.com/v1/models',
+                headers={'Authorization': f'Bearer {cfg.OPENAI_API_KEY}'},
+                timeout=8,
+            )
+            if resp.status_code == 200:
+                return jsonify({'success': True, 'mode': 'live', 'message': 'OpenAI connection successful ✅'}), 200
+            return jsonify({'success': False, 'message': f'OpenAI returned HTTP {resp.status_code}'}), 200
+        except Exception as exc:
+            return jsonify({'success': False, 'message': f'Connection error: {exc}'}), 200
+
+    @app.route('/api/settings/test-ebay', methods=['POST'])
+    def test_ebay():
+        """Quick connectivity test against the eBay API."""
+        import src.config as cfg
+        if cfg.USE_EBAY_MOCK or not cfg.EBAY_CLIENT_ID or not cfg.EBAY_CLIENT_SECRET:
+            return jsonify({
+                'success': True,
+                'mode': 'mock',
+                'message': 'Mock mode active — no API call made',
+            }), 200
+        try:
+            from src.api.ebay_client import get_ebay_token
+            get_ebay_token()
+            mode = 'sandbox' if cfg.EBAY_SANDBOX else 'production'
+            return jsonify({'success': True, 'mode': mode, 'message': f'eBay connection successful ✅ ({mode})'}), 200
+        except Exception as exc:
+            return jsonify({'success': False, 'message': f'eBay auth failed: {exc}'}), 200
+
+    # ── Error handlers ────────────────────────────────────────────────────────
+
     @app.errorhandler(413)
     def request_entity_too_large(error):
         return jsonify({'error': 'File too large. Max 16MB'}), 413
@@ -258,7 +386,7 @@ def process_listing(image_path, filename='unknown.jpg'):
     Supports either one detected item/card or multiple cards in a single image.
     """
     try:
-        print(f"📷 Analyzing uploaded image...")
+        logger.info("Analyzing uploaded image...")
         image_analysis = describe_image(image_path)
         analyses = normalize_analysis_cards(image_analysis)
 
@@ -269,7 +397,7 @@ def process_listing(image_path, filename='unknown.jpg'):
                 'message': '❌ Could not identify any items in the photo'
             }
 
-        print(f"🛒 Searching eBay for similar items...")
+        logger.info("Searching eBay for similar items...")
         results = [generate_listing_from_analysis(analysis, filename) for analysis in analyses]
 
         if len(results) == 1:
@@ -297,7 +425,7 @@ def process_listing(image_path, filename='unknown.jpg'):
         }
 
     except Exception as e:
-        print(f"❌ Error processing listing: {e}")
+        logger.error("Error processing listing: %s", e)
         return {
             'success': False,
             'error': str(e),
@@ -353,5 +481,6 @@ def format_description(analysis):
 
 
 if __name__ == '__main__':
+    from src.config import DEBUG
     app = create_app()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=DEBUG, host='127.0.0.1', port=5000)
