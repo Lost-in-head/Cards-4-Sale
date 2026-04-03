@@ -692,7 +692,7 @@ function createResultCard(data, filename) {
             </div>
             ${listingsTable}
             <div style="display:flex; gap:8px; margin-top:12px;">
-                  <button class="btn-secondary" style="width: 100%;" data-action="copy" data-listing-id="${escapeHtml(String(data.listing_id || ''))}" aria-label="Copy eBay payload for ${escapeHtml(filename)}">📋 Copy Payload</button>
+                  <button class="btn-secondary" style="width: 100%;" data-action="copy" aria-label="Copy eBay payload for ${escapeHtml(filename)}">📋 Copy Payload</button>
                   <button class="btn-primary" style="width: 100%;" data-action="list-for-sale" data-listing-id="${escapeHtml(String(data.listing_id || ''))}" aria-label="List ${escapeHtml(filename)} for sale on eBay">🛒 List for Sale</button>
             </div>
       `;

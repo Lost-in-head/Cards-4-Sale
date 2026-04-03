@@ -154,10 +154,16 @@ class ListingService:
 
     @staticmethod
     def _normalize_analyses(image_analysis: dict) -> list:
-        """Normalise analysis output to a flat list of item dicts."""
+        """Normalise analysis output to a flat list of item dicts.
+
+        If the analysis has a 'cards' list, each dict element is used directly.
+        Non-dict elements in the list are filtered out. An empty cards list (or
+        one with no valid dicts) falls back to wrapping the parent dict in a list.
+        """
         if isinstance(image_analysis, dict) and isinstance(image_analysis.get('cards'), list):
             cards = [c for c in image_analysis['cards'] if isinstance(c, dict)]
-            return cards or [image_analysis]
+            # Fall back to parent dict when no valid card dicts were found
+            return cards if cards else [image_analysis]
         return [image_analysis]
 
     @staticmethod

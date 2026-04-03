@@ -152,9 +152,9 @@ def create_app():
 
             result = process_listing(tmp_path, original_filename)
 
-        except Exception as e:
+        except Exception:
             logger.exception("Upload pipeline failed for %s", original_filename)
-            return jsonify({'error': f'Processing failed: {str(e)}'}), 500
+            return jsonify({'error': 'Processing failed. Please try again.'}), 500
         finally:
             if tmp_path and os.path.exists(tmp_path):
                 os.remove(tmp_path)

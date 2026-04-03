@@ -269,7 +269,7 @@ def record_publish_result(listing_id, published, external_listing_id=None, error
     try:
         with get_db_connection() as conn:
             if published:
-                conn.execute(
+                cursor = conn.execute(
                     '''
                     UPDATE listings
                     SET status = 'published',
@@ -282,7 +282,7 @@ def record_publish_result(listing_id, published, external_listing_id=None, error
                     (external_listing_id, listing_id),
                 )
             else:
-                conn.execute(
+                cursor = conn.execute(
                     '''
                     UPDATE listings
                     SET publish_error = ?,
@@ -291,11 +291,7 @@ def record_publish_result(listing_id, published, external_listing_id=None, error
                     ''',
                     (error_message, listing_id),
                 )
-            # Verify the listing actually existed
-            affected = conn.execute(
-                "SELECT changes()"
-            ).fetchone()[0]
-            return affected > 0
+            return cursor.rowcount > 0
     except Exception as e:
         logger.error("Error recording publish result: %s", e)
         return False
