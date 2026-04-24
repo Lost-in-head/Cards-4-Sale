@@ -14,7 +14,7 @@ Upload a photo of an item → AI analyzes it → searches eBay for similar listi
 4. ✅ Calculate suggested price (median of comparable listings)
 5. ✅ Generate listing title & description
 6. ✅ Create draft eBay inventory item
-7. 🔄 (Optional) Auto-publish to eBay
+7. ✅ Auto-publish to eBay (full offer flow: inventory item → offer → publish)
 
 ## Tech Stack
 
@@ -190,11 +190,30 @@ Then run normally — you'll see realistic demo data.
 - ✅ eBay OAuth authentication working
 - ✅ Error handling with mock fallbacks
 
-### Phase 4: Publishing
+### Phase 4: Publishing ✅ COMPLETE
 
-- Implement eBay Sell API integration
-- Auto-publish listings
-- Track published listings
+- ✅ Implement eBay Sell API integration (create offer + publish offer)
+- ✅ Auto-publish listings from the Web UI ("List for Sale" button)
+- ✅ Track published listings with real eBay listing IDs
+- ✅ Full publish flow: upsert inventory item → create offer → publish offer
+
+#### Required env vars for real publishing
+
+```bash
+# eBay business policies — obtain from Seller Account → Business Policies
+EBAY_MARKETPLACE_ID=EBAY_US
+EBAY_MERCHANT_LOCATION_KEY=your-location-key
+EBAY_FULFILLMENT_POLICY_ID=your-fulfillment-policy-id
+EBAY_PAYMENT_POLICY_ID=your-payment-policy-id
+EBAY_RETURN_POLICY_ID=your-return-policy-id
+
+# Optional
+EBAY_DEFAULT_CATEGORY_ID=        # leave blank to let eBay infer
+EBAY_DEFAULT_CURRENCY=USD
+EBAY_DEFAULT_QUANTITY=1
+```
+
+These can also be set via the **Settings page** in the Web UI.
 
 ## Useful Commands
 

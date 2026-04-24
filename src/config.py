@@ -34,6 +34,17 @@ EBAY_API_ENDPOINT = (
     else "https://api.ebay.com"
 )
 
+# eBay business policies and listing defaults
+# These are required for the full publish flow (create offer + publish offer).
+EBAY_MARKETPLACE_ID = os.getenv("EBAY_MARKETPLACE_ID", "EBAY_US")
+EBAY_MERCHANT_LOCATION_KEY = os.getenv("EBAY_MERCHANT_LOCATION_KEY", "")
+EBAY_FULFILLMENT_POLICY_ID = os.getenv("EBAY_FULFILLMENT_POLICY_ID", "")
+EBAY_PAYMENT_POLICY_ID = os.getenv("EBAY_PAYMENT_POLICY_ID", "")
+EBAY_RETURN_POLICY_ID = os.getenv("EBAY_RETURN_POLICY_ID", "")
+EBAY_DEFAULT_CATEGORY_ID = os.getenv("EBAY_DEFAULT_CATEGORY_ID", "")
+EBAY_DEFAULT_CURRENCY = os.getenv("EBAY_DEFAULT_CURRENCY", "USD")
+EBAY_DEFAULT_QUANTITY = int(os.getenv("EBAY_DEFAULT_QUANTITY", "1"))
+
 # App settings
 DEBUG = _parse_bool(os.getenv("DEBUG"), default=False)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

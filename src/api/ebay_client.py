@@ -19,6 +19,14 @@ from src.config import (
     EBAY_OAUTH_ENDPOINT,
     EBAY_API_ENDPOINT,
     USE_EBAY_MOCK,
+    EBAY_MARKETPLACE_ID,
+    EBAY_MERCHANT_LOCATION_KEY,
+    EBAY_FULFILLMENT_POLICY_ID,
+    EBAY_PAYMENT_POLICY_ID,
+    EBAY_RETURN_POLICY_ID,
+    EBAY_DEFAULT_CATEGORY_ID,
+    EBAY_DEFAULT_CURRENCY,
+    EBAY_DEFAULT_QUANTITY,
 )
 from src.api.mock_ebay import search_ebay_mock
 
@@ -162,6 +170,40 @@ def suggest_price(listings: list) -> float:
     return round(median(prices), 2)
 
 
+_CONDITION_MAP = {
+    # Pass-through values already accepted by the eBay Inventory API
+    "NEW": "NEW",
+    "LIKE_NEW": "LIKE_NEW",
+    "NEW_OTHER": "NEW_OTHER",
+    "NEW_WITH_DEFECTS": "NEW_WITH_DEFECTS",
+    "MANUFACTURER_REFURBISHED": "MANUFACTURER_REFURBISHED",
+    "SELLER_REFURBISHED": "SELLER_REFURBISHED",
+    "USED_EXCELLENT": "USED_EXCELLENT",
+    "USED_VERY_GOOD": "USED_VERY_GOOD",
+    "USED_GOOD": "USED_GOOD",
+    "USED_ACCEPTABLE": "USED_ACCEPTABLE",
+    "FOR_PARTS_OR_NOT_WORKING": "FOR_PARTS_OR_NOT_WORKING",
+    # Human-readable strings from image analysis → nearest eBay equivalent
+    "NEW_IN_BOX": "NEW",
+    "MINT": "LIKE_NEW",
+    "NEAR_MINT": "USED_EXCELLENT",
+    "VERY_GOOD": "USED_VERY_GOOD",
+    "GOOD": "USED_GOOD",
+    "ACCEPTABLE": "USED_ACCEPTABLE",
+    "POOR": "FOR_PARTS_OR_NOT_WORKING",
+    "REFURBISHED": "SELLER_REFURBISHED",
+}
+_DEFAULT_CONDITION = "USED_GOOD"
+
+
+def _normalize_condition(condition: str) -> str:
+    """Map a human-readable or raw condition string to a valid eBay condition."""
+    if not condition:
+        return _DEFAULT_CONDITION
+    upper = condition.upper().replace(" ", "_").replace("-", "_")
+    return _CONDITION_MAP.get(upper, _DEFAULT_CONDITION)
+
+
 def build_listing_payload(title: str, description: str, price: float, condition: str = "USED_GOOD") -> dict:
     """
     Build eBay Sell Inventory API payload (simplified).
@@ -176,19 +218,105 @@ def build_listing_payload(title: str, description: str, price: float, condition:
         },
         "availability": {
             "shipToLocationAvailability": {
-                "quantity": 1
+                "quantity": EBAY_DEFAULT_QUANTITY,
             }
         },
         "price": {
             "value": str(price),
-            "currency": "USD",
+            "currency": EBAY_DEFAULT_CURRENCY,
         },
-        "condition": condition,
+        "condition": _normalize_condition(condition),
     }
 
 
+def create_offer(sku: str, price: str, currency: str) -> str:
+    """
+    Create a fixed-price eBay offer for an existing inventory item.
+
+    Returns the offerId string on success.
+    Requires EBAY_MERCHANT_LOCATION_KEY, EBAY_FULFILLMENT_POLICY_ID,
+    EBAY_PAYMENT_POLICY_ID, and EBAY_RETURN_POLICY_ID to be configured.
+    """
+    token = get_ebay_token()
+    endpoint = f"{EBAY_API_ENDPOINT}/sell/inventory/v1/offer"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Content-Language": "en-US",
+    }
+
+    offer_body: dict = {
+        "sku": sku,
+        "marketplaceId": EBAY_MARKETPLACE_ID,
+        "format": "FIXED_PRICE",
+        "availableQuantity": EBAY_DEFAULT_QUANTITY,
+        "pricingSummary": {
+            "price": {
+                "value": price,
+                "currency": currency,
+            }
+        },
+        "listingPolicies": {
+            "fulfillmentPolicyId": EBAY_FULFILLMENT_POLICY_ID,
+            "paymentPolicyId": EBAY_PAYMENT_POLICY_ID,
+            "returnPolicyId": EBAY_RETURN_POLICY_ID,
+        },
+    }
+
+    if EBAY_MERCHANT_LOCATION_KEY:
+        offer_body["merchantLocationKey"] = EBAY_MERCHANT_LOCATION_KEY
+
+    if EBAY_DEFAULT_CATEGORY_ID:
+        offer_body["categoryId"] = EBAY_DEFAULT_CATEGORY_ID
+
+    response = requests.post(endpoint, headers=headers, json=offer_body, timeout=15)
+    response.raise_for_status()
+
+    offer_data = response.json()
+    offer_id = offer_data.get("offerId")
+    if not offer_id:
+        raise ValueError(f"eBay create_offer returned no offerId: {offer_data}")
+    logger.info("Created eBay offer %s for SKU %s", offer_id, sku)
+    return offer_id
+
+
+def publish_offer(offer_id: str) -> str:
+    """
+    Publish an existing eBay offer and return the live listing ID.
+
+    Calls POST /sell/inventory/v1/offer/{offerId}/publish and returns
+    the ``listingId`` from eBay.
+    """
+    token = get_ebay_token()
+    endpoint = f"{EBAY_API_ENDPOINT}/sell/inventory/v1/offer/{offer_id}/publish"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+
+    response = requests.post(endpoint, headers=headers, timeout=15)
+    response.raise_for_status()
+
+    publish_data = response.json()
+    listing_id = publish_data.get("listingId")
+    if not listing_id:
+        raise ValueError(f"eBay publish_offer returned no listingId: {publish_data}")
+    logger.info("Published eBay offer %s → listing %s", offer_id, listing_id)
+    return listing_id
+
+
 def publish_listing(payload: dict) -> dict:
-    """Publish listing payload to eBay (mock or real)."""
+    """
+    Publish a listing to eBay using the full Sell Inventory flow.
+
+    Steps:
+      1. Upsert inventory item (PUT /sell/inventory/v1/inventory_item/{sku})
+      2. Create offer  (POST /sell/inventory/v1/offer)
+      3. Publish offer (POST /sell/inventory/v1/offer/{offerId}/publish)
+
+    Returns a dict with ``status``, ``external_listing_id``, and ``mode``.
+    Falls back to mock when USE_EBAY_MOCK is True or credentials are absent.
+    """
     if USE_EBAY_MOCK or not EBAY_CLIENT_ID or not EBAY_CLIENT_SECRET:
         sku = payload.get("sku", "AUTO_GENERATED_SKU")
         return {
@@ -198,18 +326,37 @@ def publish_listing(payload: dict) -> dict:
         }
 
     token = get_ebay_token()
-    endpoint = f"{EBAY_API_ENDPOINT}/sell/inventory/v1/inventory_item/{payload['sku']}"
-    headers = {
+    sku = payload["sku"]
+
+    # Step 1: Upsert inventory item
+    inv_endpoint = f"{EBAY_API_ENDPOINT}/sell/inventory/v1/inventory_item/{sku}"
+    inv_headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Content-Language": "en-US",
     }
-
-    response = requests.put(endpoint, headers=headers, json=payload, timeout=15)
+    # The inventory item body contains product, availability, and condition.
+    # Price lives in the offer body, not here.
+    inv_body = {
+        "product": payload.get("product", {}),
+        "availability": payload.get("availability", {}),
+        "condition": payload.get("condition", _DEFAULT_CONDITION),
+    }
+    response = requests.put(inv_endpoint, headers=inv_headers, json=inv_body, timeout=15)
     response.raise_for_status()
+    logger.info("Upserted eBay inventory item for SKU %s", sku)
+
+    # Step 2: Create offer
+    price_info = payload.get("price", {})
+    price_value = price_info.get("value", "0.00")
+    price_currency = price_info.get("currency", EBAY_DEFAULT_CURRENCY)
+    offer_id = create_offer(sku, price_value, price_currency)
+
+    # Step 3: Publish offer → get live listing ID
+    listing_id = publish_offer(offer_id)
 
     return {
         "status": "published",
-        "external_listing_id": payload["sku"],
+        "external_listing_id": listing_id,
         "mode": "real",
     }
