@@ -20,6 +20,32 @@ def real_ebay_mode(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _normalize_condition
+# ---------------------------------------------------------------------------
+
+def test_normalize_condition_passthrough():
+    """Known eBay condition strings should be returned unchanged."""
+    assert ebay_client._normalize_condition("USED_GOOD") == "USED_GOOD"
+    assert ebay_client._normalize_condition("NEW") == "NEW"
+    assert ebay_client._normalize_condition("LIKE_NEW") == "LIKE_NEW"
+
+
+def test_normalize_condition_human_readable():
+    """Human-readable strings should map to the correct eBay condition."""
+    assert ebay_client._normalize_condition("Mint") == "LIKE_NEW"
+    assert ebay_client._normalize_condition("Near Mint") == "USED_EXCELLENT"
+    assert ebay_client._normalize_condition("Good") == "USED_GOOD"
+    assert ebay_client._normalize_condition("Poor") == "FOR_PARTS_OR_NOT_WORKING"
+
+
+def test_normalize_condition_unknown_defaults():
+    """Unknown or blank conditions should fall back to USED_GOOD."""
+    assert ebay_client._normalize_condition("Unknown") == "USED_GOOD"
+    assert ebay_client._normalize_condition("") == "USED_GOOD"
+    assert ebay_client._normalize_condition(None) == "USED_GOOD"
+
+
+# ---------------------------------------------------------------------------
 # get_ebay_token
 # ---------------------------------------------------------------------------
 
@@ -130,8 +156,14 @@ def test_publish_listing_mock_mode_returns_mock_prefixed_id():
 
 
 def test_publish_listing_real_mode_success(real_ebay_mode, monkeypatch):
-    """publish_listing in real mode should call the eBay Inventory API and return real mode result."""
+    """publish_listing in real mode should run the full flow and return the live listing ID."""
     monkeypatch.setattr(ebay_client, "EBAY_API_ENDPOINT", "https://api.sandbox.ebay.com")
+    monkeypatch.setattr(ebay_client, "EBAY_FULFILLMENT_POLICY_ID", "fp-123")
+    monkeypatch.setattr(ebay_client, "EBAY_PAYMENT_POLICY_ID", "pp-456")
+    monkeypatch.setattr(ebay_client, "EBAY_RETURN_POLICY_ID", "rp-789")
+    monkeypatch.setattr(ebay_client, "EBAY_DEFAULT_CURRENCY", "USD")
+
+    call_log = []
 
     class FakeTokenResponse:
         def raise_for_status(self):
@@ -147,11 +179,186 @@ def test_publish_listing_real_mode_success(real_ebay_mode, monkeypatch):
         def json(self):
             return {}
 
-    monkeypatch.setattr(requests, "post", lambda *a, **kw: FakeTokenResponse())
-    monkeypatch.setattr(requests, "put", lambda *a, **kw: FakePutResponse())
+    class FakeOfferResponse:
+        def raise_for_status(self):
+            pass
 
-    payload = {"sku": "REAL-SKU-999", "product": {"title": "Real Item"}}
+        def json(self):
+            return {"offerId": "offer-abc"}
+
+    class FakePublishResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"listingId": "LIVE-LISTING-999"}
+
+    http_responses = iter(
+        [FakeOfferResponse(), FakePublishResponse()]
+    )
+
+    def fake_post(url, *args, **kwargs):
+        call_log.append(("post", url))
+        if "oauth2/token" in url:
+            return FakeTokenResponse()
+        return next(http_responses)
+
+    def fake_put(url, *args, **kwargs):
+        call_log.append(("put", url))
+        return FakePutResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    monkeypatch.setattr(requests, "put", fake_put)
+
+    payload = {
+        "sku": "REAL-SKU-999",
+        "product": {"title": "Real Item"},
+        "availability": {"shipToLocationAvailability": {"quantity": 1}},
+        "condition": "USED_GOOD",
+        "price": {"value": "9.99", "currency": "USD"},
+    }
     result = ebay_client.publish_listing(payload)
     assert result["status"] == "published"
-    assert result["external_listing_id"] == "REAL-SKU-999"
+    assert result["external_listing_id"] == "LIVE-LISTING-999"
     assert result["mode"] == "real"
+
+
+# ---------------------------------------------------------------------------
+# create_offer
+# ---------------------------------------------------------------------------
+
+def test_create_offer_returns_offer_id(real_ebay_mode, monkeypatch):
+    """create_offer should POST to the offer endpoint and return the offerId."""
+    monkeypatch.setattr(ebay_client, "EBAY_API_ENDPOINT", "https://api.sandbox.ebay.com")
+    monkeypatch.setattr(ebay_client, "EBAY_FULFILLMENT_POLICY_ID", "fp-1")
+    monkeypatch.setattr(ebay_client, "EBAY_PAYMENT_POLICY_ID", "pp-2")
+    monkeypatch.setattr(ebay_client, "EBAY_RETURN_POLICY_ID", "rp-3")
+    monkeypatch.setattr(ebay_client, "EBAY_MERCHANT_LOCATION_KEY", "loc-key")
+    monkeypatch.setattr(ebay_client, "EBAY_DEFAULT_CATEGORY_ID", "64482")
+
+    class FakeTokenResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"access_token": "tok"}
+
+    class FakeOfferResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"offerId": "offer-xyz"}
+
+    posted_bodies = []
+
+    def fake_post(url, *args, **kwargs):
+        if "oauth2/token" in url:
+            return FakeTokenResponse()
+        posted_bodies.append(kwargs.get("json", {}))
+        return FakeOfferResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    offer_id = ebay_client.create_offer("MY-SKU", "12.50", "USD")
+    assert offer_id == "offer-xyz"
+    assert len(posted_bodies) == 1
+    body = posted_bodies[0]
+    assert body["sku"] == "MY-SKU"
+    assert body["format"] == "FIXED_PRICE"
+    assert body["pricingSummary"]["price"]["value"] == "12.50"
+    assert body["merchantLocationKey"] == "loc-key"
+    assert body["categoryId"] == "64482"
+
+
+def test_create_offer_raises_when_no_offer_id(real_ebay_mode, monkeypatch):
+    """create_offer should raise ValueError when the API returns no offerId."""
+    monkeypatch.setattr(ebay_client, "EBAY_API_ENDPOINT", "https://api.sandbox.ebay.com")
+
+    class FakeTokenResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"access_token": "tok"}
+
+    class FakeOfferResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {}  # no offerId
+
+    def fake_post(url, *args, **kwargs):
+        if "oauth2/token" in url:
+            return FakeTokenResponse()
+        return FakeOfferResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(ValueError, match="offerId"):
+        ebay_client.create_offer("SKU-X", "5.00", "USD")
+
+
+# ---------------------------------------------------------------------------
+# publish_offer
+# ---------------------------------------------------------------------------
+
+def test_publish_offer_returns_listing_id(real_ebay_mode, monkeypatch):
+    """publish_offer should POST to publish endpoint and return the listingId."""
+    monkeypatch.setattr(ebay_client, "EBAY_API_ENDPOINT", "https://api.sandbox.ebay.com")
+
+    class FakeTokenResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"access_token": "tok"}
+
+    class FakePublishResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"listingId": "LIVE-12345"}
+
+    posted_urls = []
+
+    def fake_post(url, *args, **kwargs):
+        posted_urls.append(url)
+        if "oauth2/token" in url:
+            return FakeTokenResponse()
+        return FakePublishResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    listing_id = ebay_client.publish_offer("offer-abc")
+    assert listing_id == "LIVE-12345"
+    assert any("offer-abc/publish" in u for u in posted_urls)
+
+
+def test_publish_offer_raises_when_no_listing_id(real_ebay_mode, monkeypatch):
+    """publish_offer should raise ValueError when the API returns no listingId."""
+    monkeypatch.setattr(ebay_client, "EBAY_API_ENDPOINT", "https://api.sandbox.ebay.com")
+
+    class FakeTokenResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"access_token": "tok"}
+
+    class FakePublishResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {}  # no listingId
+
+    def fake_post(url, *args, **kwargs):
+        if "oauth2/token" in url:
+            return FakeTokenResponse()
+        return FakePublishResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    with pytest.raises(ValueError, match="listingId"):
+        ebay_client.publish_offer("offer-xyz")

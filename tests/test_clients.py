@@ -35,7 +35,7 @@ def test_suggest_price_all_listings_missing_price_returns_none():
 def test_build_listing_payload_shape():
     payload = build_listing_payload("Test Title", "Test desc", 299.99, "Like New")
     assert payload["price"]["value"] == "299.99"
-    assert payload["condition"] == "Like New"
+    assert payload["condition"] == "LIKE_NEW"
 
 
 def test_build_listing_payload_generates_unique_skus():

@@ -49,7 +49,20 @@ CREDENTIAL_KEYS: frozenset[str] = frozenset(
 TOGGLE_KEYS: frozenset[str] = frozenset(
     {"USE_OPENAI_MOCK", "USE_EBAY_MOCK", "EBAY_SANDBOX"}
 )
-ALL_KEYS: frozenset[str] = CREDENTIAL_KEYS | TOGGLE_KEYS
+# eBay business policy / listing configuration keys (non-sensitive strings)
+POLICY_KEYS: frozenset[str] = frozenset(
+    {
+        "EBAY_MARKETPLACE_ID",
+        "EBAY_MERCHANT_LOCATION_KEY",
+        "EBAY_FULFILLMENT_POLICY_ID",
+        "EBAY_PAYMENT_POLICY_ID",
+        "EBAY_RETURN_POLICY_ID",
+        "EBAY_DEFAULT_CATEGORY_ID",
+        "EBAY_DEFAULT_CURRENCY",
+        "EBAY_DEFAULT_QUANTITY",
+    }
+)
+ALL_KEYS: frozenset[str] = CREDENTIAL_KEYS | TOGGLE_KEYS | POLICY_KEYS
 
 
 # ── Keyring helpers ───────────────────────────────────────────────────────────

@@ -207,6 +207,15 @@ def create_app():
             'use_openai_mock': os.environ.get('USE_OPENAI_MOCK', str(cfg.USE_OPENAI_MOCK)).lower() == 'true',
             'use_ebay_mock': os.environ.get('USE_EBAY_MOCK', str(cfg.USE_EBAY_MOCK)).lower() == 'true',
             'ebay_sandbox': os.environ.get('EBAY_SANDBOX', str(cfg.EBAY_SANDBOX)).lower() == 'true',
+            # eBay business policy / listing config
+            'ebay_marketplace_id': stored.get('EBAY_MARKETPLACE_ID', cfg.EBAY_MARKETPLACE_ID),
+            'ebay_merchant_location_key': stored.get('EBAY_MERCHANT_LOCATION_KEY', cfg.EBAY_MERCHANT_LOCATION_KEY),
+            'ebay_fulfillment_policy_id': stored.get('EBAY_FULFILLMENT_POLICY_ID', cfg.EBAY_FULFILLMENT_POLICY_ID),
+            'ebay_payment_policy_id': stored.get('EBAY_PAYMENT_POLICY_ID', cfg.EBAY_PAYMENT_POLICY_ID),
+            'ebay_return_policy_id': stored.get('EBAY_RETURN_POLICY_ID', cfg.EBAY_RETURN_POLICY_ID),
+            'ebay_default_category_id': stored.get('EBAY_DEFAULT_CATEGORY_ID', cfg.EBAY_DEFAULT_CATEGORY_ID),
+            'ebay_default_currency': stored.get('EBAY_DEFAULT_CURRENCY', cfg.EBAY_DEFAULT_CURRENCY),
+            'ebay_default_quantity': stored.get('EBAY_DEFAULT_QUANTITY', str(cfg.EBAY_DEFAULT_QUANTITY)),
         }), 200
 
     @app.route('/api/settings', methods=['POST'])
@@ -227,6 +236,19 @@ def create_app():
         for key in ('USE_OPENAI_MOCK', 'USE_EBAY_MOCK', 'EBAY_SANDBOX'):
             if key in data:
                 to_save[key] = 'True' if data[key] else 'False'
+
+        for key in (
+            'EBAY_MARKETPLACE_ID',
+            'EBAY_MERCHANT_LOCATION_KEY',
+            'EBAY_FULFILLMENT_POLICY_ID',
+            'EBAY_PAYMENT_POLICY_ID',
+            'EBAY_RETURN_POLICY_ID',
+            'EBAY_DEFAULT_CATEGORY_ID',
+            'EBAY_DEFAULT_CURRENCY',
+            'EBAY_DEFAULT_QUANTITY',
+        ):
+            if key in data:
+                to_save[key] = data[key]
 
         settings_store.save_all(to_save)
 
