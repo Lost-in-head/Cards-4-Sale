@@ -1,187 +1,305 @@
 """
-Settings store for Cards 4 Sale.
-
-Provides a portable credential/settings store that:
-  1. Tries the OS keychain via the ``keyring`` library (secure on macOS/Windows/Linux
-     with a secret service daemon running).
-  2. Falls back to a JSON file in the user data directory when no OS keychain is
-     available (e.g., headless servers, CI, fresh Linux installs without a running
-     secret-service).
-
-The fallback file lives at ``get_data_dir() / "settings.json"`` and is readable
-only by the current user (permissions are set to 0o600 on POSIX systems).
-
-Stored keys
------------
-Credentials (sensitive — keyring preferred):
-    OPENAI_API_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET
-
-Toggles (non-sensitive booleans stored as string "True"/"False"):
-    USE_OPENAI_MOCK, USE_EBAY_MOCK, EBAY_SANDBOX
-
-Usage
------
-    from src.settings_store import load_all, save_all, apply_to_env
-
-    # At app startup (before config.py is evaluated):
-    apply_to_env()
-
-    # In the /api/settings POST handler:
-    save_all({"OPENAI_API_KEY": "sk-...", "USE_OPENAI_MOCK": "False"})
+Database models and operations for managing eBay listings
 """
 
 import json
 import logging
-import os
-import stat
+import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
-from src.paths import get_data_dir
+from src.paths import get_db_path
 
 logger = logging.getLogger(__name__)
 
-_SERVICE_NAME = "Cards4Sale"
-
-# All keys managed by this store
-CREDENTIAL_KEYS: frozenset[str] = frozenset(
-    {"OPENAI_API_KEY", "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET"}
-)
-TOGGLE_KEYS: frozenset[str] = frozenset(
-    {"USE_OPENAI_MOCK", "USE_EBAY_MOCK", "EBAY_SANDBOX"}
-)
-# eBay business policy / listing configuration keys (non-sensitive strings)
-POLICY_KEYS: frozenset[str] = frozenset(
-    {
-        "EBAY_MARKETPLACE_ID",
-        "EBAY_MERCHANT_LOCATION_KEY",
-        "EBAY_FULFILLMENT_POLICY_ID",
-        "EBAY_PAYMENT_POLICY_ID",
-        "EBAY_RETURN_POLICY_ID",
-        "EBAY_DEFAULT_CATEGORY_ID",
-        "EBAY_DEFAULT_CURRENCY",
-        "EBAY_DEFAULT_QUANTITY",
-    }
-)
-ALL_KEYS: frozenset[str] = CREDENTIAL_KEYS | TOGGLE_KEYS | POLICY_KEYS
+DATABASE_PATH = get_db_path()
 
 
-# ── Keyring helpers ───────────────────────────────────────────────────────────
+def _resolve_database_path() -> Path:
+    """Return the active SQLite path, honoring any runtime monkeypatches."""
+    configured = globals().get("DATABASE_PATH")
+    if configured is not None:
+        return Path(configured)
+    return get_db_path()
 
-def _keyring_get(key: str) -> str | None:
+
+@contextmanager
+def get_db_connection(timeout: int = 30):
+    """
+    Context manager for safe database connections.
+
+    Commits on clean exit; rolls back and re-raises on any exception.
+
+    Usage::
+
+        with get_db_connection() as conn:
+            conn.execute("INSERT INTO listings …")
+    """
+    db_path = _resolve_database_path()
+    conn = sqlite3.connect(str(db_path), timeout=timeout)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
-        import keyring
-        return keyring.get_password(_SERVICE_NAME, key)
+        yield conn
+        conn.commit()
     except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db():
+    """Initialize database with listings table and performance indexes."""
+    with get_db_connection() as conn:
+        conn.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                filename TEXT,
+                category TEXT,
+                condition TEXT,
+                brand TEXT,
+                model TEXT,
+                features TEXT,
+                suggested_price REAL,
+                comparable_listings TEXT,
+                payload TEXT NOT NULL,
+                status TEXT DEFAULT 'draft',
+                external_listing_id TEXT,
+                published_at TIMESTAMP,
+                publish_error TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            '''
+        )
+
+        # Backfill publish-tracking columns for older DBs
+        cursor = conn.execute("PRAGMA table_info(listings)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        if "external_listing_id" not in existing_columns:
+            conn.execute("ALTER TABLE listings ADD COLUMN external_listing_id TEXT")
+        if "published_at" not in existing_columns:
+            conn.execute("ALTER TABLE listings ADD COLUMN published_at TIMESTAMP")
+        if "publish_error" not in existing_columns:
+            conn.execute("ALTER TABLE listings ADD COLUMN publish_error TEXT")
+
+        # Performance indexes
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_listings_status ON listings (status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_listings_created_at ON listings (created_at DESC)"
+        )
+
+
+def save_listing(title, filename, analysis, comparable_listings, suggested_price, payload):
+    """Save a generated listing to database"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.execute(
+                '''
+                INSERT INTO listings
+                (title, filename, category, condition, brand, model, features,
+                 suggested_price, comparable_listings, payload, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    title,
+                    filename,
+                    analysis.get("category", ""),
+                    analysis.get("condition", ""),
+                    analysis.get("brand", ""),
+                    analysis.get("model", ""),
+                    json.dumps(analysis.get("features", [])),
+                    suggested_price,
+                    json.dumps(comparable_listings),
+                    json.dumps(payload),
+                    "draft",
+                ),
+            )
+            return cursor.lastrowid
+    except Exception as e:
+        logger.error("Error saving listing: %s", e)
         return None
 
 
-def _keyring_set(key: str, value: str) -> bool:
-    """Return True on success, False if no OS keychain is available."""
+def get_all_listings():
+    """Get all listings from database"""
     try:
-        import keyring
-        keyring.set_password(_SERVICE_NAME, key, value)
-        return True
-    except Exception:
+        with get_db_connection() as conn:
+            cursor = conn.execute(
+                '''
+                SELECT id, title, filename, category, condition, brand, model,
+                       suggested_price, status, created_at, updated_at
+                FROM listings
+                ORDER BY created_at DESC, id DESC
+                '''
+            )
+
+            listings = []
+            for row in cursor.fetchall():
+                listings.append(
+                    {
+                        "id": row[0],
+                        "title": row[1],
+                        "filename": row[2],
+                        "category": row[3],
+                        "condition": row[4],
+                        "brand": row[5],
+                        "model": row[6],
+                        "suggested_price": row[7],
+                        "status": row[8],
+                        "created_at": row[9],
+                        "updated_at": row[10],
+                    }
+                )
+
+            return listings
+    except Exception as e:
+        logger.error("Error fetching listings: %s", e)
+        return []
+
+
+def get_listing(listing_id):
+    """Get a specific listing by ID"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.execute(
+                '''
+                SELECT id, title, filename, category, condition, brand, model, features,
+                       suggested_price, comparable_listings, payload, status, external_listing_id,
+                       published_at, publish_error, created_at, updated_at
+                FROM listings
+                WHERE id = ?
+                ''',
+                (listing_id,),
+            )
+
+            row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        try:
+            features = json.loads(row[7]) if row[7] else []
+        except (json.JSONDecodeError, TypeError):
+            features = []
+
+        try:
+            comparable_listings = json.loads(row[9]) if row[9] else []
+        except (json.JSONDecodeError, TypeError):
+            comparable_listings = []
+
+        try:
+            payload = json.loads(row[10]) if row[10] else {}
+        except (json.JSONDecodeError, TypeError):
+            payload = {}
+
+        return {
+            "id": row[0],
+            "title": row[1],
+            "filename": row[2],
+            "category": row[3],
+            "condition": row[4],
+            "brand": row[5],
+            "model": row[6],
+            "features": features,
+            "suggested_price": row[8],
+            "comparable_listings": comparable_listings,
+            "payload": payload,
+            "status": row[11],
+            "external_listing_id": row[12],
+            "published_at": row[13],
+            "publish_error": row[14],
+            "created_at": row[15],
+            "updated_at": row[16],
+        }
+    except Exception as e:
+        logger.error("Error fetching listing %s: %s", listing_id, e)
+        return None
+
+
+def update_listing_status(listing_id, status):
+    """Update listing status (draft, published, archived)"""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.execute(
+                '''
+                UPDATE listings
+                SET status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                ''',
+                (status, listing_id),
+            )
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error("Error updating listing status: %s", e)
         return False
 
 
-def _keyring_delete(key: str) -> None:
+def delete_listing(listing_id):
+    """Delete a listing from database"""
     try:
-        import keyring
-        keyring.delete_password(_SERVICE_NAME, key)
-    except Exception:
-        pass
+        with get_db_connection() as conn:
+            cursor = conn.execute("DELETE FROM listings WHERE id = ?", (listing_id,))
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error("Error deleting listing: %s", e)
+        return False
 
 
-# ── File fallback helpers ─────────────────────────────────────────────────────
-
-def _fallback_path() -> Path:
-    return get_data_dir() / "settings.json"
-
-
-def _load_fallback() -> dict:
-    path = _fallback_path()
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning("Could not read settings file %s: %s", path, exc)
-    return {}
-
-
-def _save_fallback(data: dict) -> None:
-    path = _fallback_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    # Restrict file permissions on POSIX (owner read/write only)
+def get_stats():
+    """Get database statistics"""
     try:
-        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass  # Windows or permission error — not critical
+        with get_db_connection() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
+            drafts = conn.execute(
+                "SELECT COUNT(*) FROM listings WHERE status = 'draft'"
+            ).fetchone()[0]
+            published = conn.execute(
+                "SELECT COUNT(*) FROM listings WHERE status = 'published'"
+            ).fetchone()[0]
+            archived = conn.execute(
+                "SELECT COUNT(*) FROM listings WHERE status = 'archived'"
+            ).fetchone()[0]
+
+        return {"total": total, "drafts": drafts, "published": published, "archived": archived}
+    except Exception as e:
+        logger.error("Error getting stats: %s", e)
+        return {"total": 0, "drafts": 0, "published": 0, "archived": 0}
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
-
-def get_credential(key: str) -> str | None:
-    """Return a stored credential, or None if not set."""
-    value = _keyring_get(key)
-    if value is not None:
-        return value
-    return _load_fallback().get(key)
-
-
-def save_credential(key: str, value: str) -> None:
-    """Persist a credential to the OS keychain if available, else to the fallback file."""
-    if not _keyring_set(key, value):
-        data = _load_fallback()
-        data[key] = value
-        _save_fallback(data)
-        logger.debug("Saved %s to fallback settings file", key)
-
-
-def delete_credential(key: str) -> None:
-    """Remove a stored credential from both keychain and fallback file."""
-    _keyring_delete(key)
-    data = _load_fallback()
-    if key in data:
-        del data[key]
-        _save_fallback(data)
-
-
-def load_all() -> dict:
-    """Return all currently stored settings as a plain dict."""
-    result = {}
-    for key in ALL_KEYS:
-        val = get_credential(key)
-        if val is not None:
-            result[key] = val
-    return result
-
-
-def save_all(settings: dict) -> None:
-    """
-    Save a dict of settings.  Only keys present in ALL_KEYS are persisted;
-    unknown keys are silently ignored.
-    """
-    for key, value in settings.items():
-        if key in ALL_KEYS:
-            if not value:
-                # Treat empty string / None as "delete this credential"
-                delete_credential(key)
+def record_publish_result(listing_id, published, external_listing_id=None, error_message=None):
+    """Record publish success/failure metadata for a listing."""
+    try:
+        with get_db_connection() as conn:
+            if published:
+                cursor = conn.execute(
+                    '''
+                    UPDATE listings
+                    SET status = 'published',
+                        external_listing_id = ?,
+                        published_at = CURRENT_TIMESTAMP,
+                        publish_error = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    ''',
+                    (external_listing_id, listing_id),
+                )
             else:
-                save_credential(key, str(value))
-
-
-def apply_to_env() -> None:
-    """
-    Load all stored settings and push them into ``os.environ``.
-
-    Call this **before** importing ``src.config`` so that the loaded values
-    take precedence over the ``.env`` file.
-    """
-    stored = load_all()
-    for key, value in stored.items():
-        os.environ[key] = value
-        logger.debug("Applied stored setting %s to environment", key)
-    if stored:
-        logger.info("Applied %d stored setting(s) from settings store", len(stored))
+                cursor = conn.execute(
+                    '''
+                    UPDATE listings
+                    SET publish_error = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    ''',
+                    (error_message, listing_id),
+                )
+            return cursor.rowcount > 0
+    except Exception as e:
+        logger.error("Error recording publish result: %s", e)
+        return False

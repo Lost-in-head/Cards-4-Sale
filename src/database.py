@@ -1,297 +1,198 @@
 """
-Database models and operations for managing eBay listings
+Input validation for uploaded files and API payloads.
+Validates early to prevent bad data from entering the system.
 """
-
 import logging
-import sqlite3
-import json
-from contextlib import contextmanager
-from pathlib import Path
-
-from src.paths import get_db_path
+from typing import Tuple
 
 logger = logging.getLogger(__name__)
 
-DATABASE_PATH = get_db_path()
 
+class ImageValidator:
+    """Validates uploaded image files."""
 
-@contextmanager
-def get_db_connection(timeout: int = 30):
-    """
-    Context manager for safe database connections.
+    ALLOWED_TYPES = {'jpg', 'jpeg', 'png', 'gif'}  # Kept in sync with config.ALLOWED_EXTENSIONS
+    MAX_FILENAME_LENGTH = 256
+    FORBIDDEN_CHARS = {'\x00', '/', '\\'}
 
-    Commits on clean exit; rolls back and re-raises on any exception.
+    @staticmethod
+    def _resolve_max_size_bytes() -> int:
+        """Read the configured upload limit and fall back to a safe default."""
+        try:
+            from src import config as config_module
 
-    Usage::
+            configured = getattr(config_module, "MAX_CONTENT_LENGTH", None)
+            if isinstance(configured, int) and configured > 0:
+                return configured
+        except Exception:
+            pass
+        return 16 * 1024 * 1024
 
-        with get_db_connection() as conn:
-            conn.execute("INSERT INTO listings …")
-    """
-    conn = sqlite3.connect(str(DATABASE_PATH), timeout=timeout)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+    @staticmethod
+    def validate_upload(filename: str, file_size: int) -> Tuple[bool, str]:
+        """
+        Validate uploaded file metadata.
 
+        Returns:
+            (is_valid, error_message)
+        """
+        if not filename:
+            return False, "Filename is empty"
 
-def init_db():
-    """Initialize database with listings table and performance indexes."""
-    with get_db_connection() as conn:
-        conn.execute(
-            '''
-            CREATE TABLE IF NOT EXISTS listings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                filename TEXT,
-                category TEXT,
-                condition TEXT,
-                brand TEXT,
-                model TEXT,
-                features TEXT,
-                suggested_price REAL,
-                comparable_listings TEXT,
-                payload TEXT NOT NULL,
-                status TEXT DEFAULT 'draft',
-                external_listing_id TEXT,
-                published_at TIMESTAMP,
-                publish_error TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            '''
-        )
+        if len(filename) > ImageValidator.MAX_FILENAME_LENGTH:
+            return False, f"Filename too long (max {ImageValidator.MAX_FILENAME_LENGTH} chars)"
 
-        # Backfill publish-tracking columns for older DBs
-        cursor = conn.execute("PRAGMA table_info(listings)")
-        existing_columns = {row[1] for row in cursor.fetchall()}
-        if "external_listing_id" not in existing_columns:
-            conn.execute("ALTER TABLE listings ADD COLUMN external_listing_id TEXT")
-        if "published_at" not in existing_columns:
-            conn.execute("ALTER TABLE listings ADD COLUMN published_at TIMESTAMP")
-        if "publish_error" not in existing_columns:
-            conn.execute("ALTER TABLE listings ADD COLUMN publish_error TEXT")
-
-        # Performance indexes
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_listings_status ON listings (status)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_listings_created_at ON listings (created_at DESC)"
-        )
-
-
-
-def save_listing(title, filename, analysis, comparable_listings, suggested_price, payload):
-    """Save a generated listing to database"""
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.execute(
-                '''
-                INSERT INTO listings
-                (title, filename, category, condition, brand, model, features,
-                 suggested_price, comparable_listings, payload, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    title,
-                    filename,
-                    analysis.get("category", ""),
-                    analysis.get("condition", ""),
-                    analysis.get("brand", ""),
-                    analysis.get("model", ""),
-                    json.dumps(analysis.get("features", [])),
-                    suggested_price,
-                    json.dumps(comparable_listings),
-                    json.dumps(payload),
-                    "draft",
-                ),
-            )
-            return cursor.lastrowid
-    except Exception as e:
-        logger.error("Error saving listing: %s", e)
-        return None
-
-
-def get_all_listings():
-    """Get all listings from database"""
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.execute(
-                '''
-                SELECT id, title, filename, category, condition, brand, model,
-                       suggested_price, status, created_at, updated_at
-                FROM listings
-                ORDER BY created_at DESC, id DESC
-                '''
-            )
-
-            listings = []
-            for row in cursor.fetchall():
-                listings.append(
-                    {
-                        "id": row[0],
-                        "title": row[1],
-                        "filename": row[2],
-                        "category": row[3],
-                        "condition": row[4],
-                        "brand": row[5],
-                        "model": row[6],
-                        "suggested_price": row[7],
-                        "status": row[8],
-                        "created_at": row[9],
-                        "updated_at": row[10],
-                    }
-                )
-
-            return listings
-    except Exception as e:
-        logger.error("Error fetching listings: %s", e)
-        return []
-
-
-def get_listing(listing_id):
-    """Get a specific listing by ID"""
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.execute(
-                '''
-                SELECT id, title, filename, category, condition, brand, model, features,
-                       suggested_price, comparable_listings, payload, status, external_listing_id,
-                       published_at, publish_error, created_at, updated_at
-                FROM listings
-                WHERE id = ?
-                ''',
-                (listing_id,),
-            )
-
-            row = cursor.fetchone()
-
-        if not row:
-            return None
+        if any(char in filename for char in ImageValidator.FORBIDDEN_CHARS):
+            return False, "Filename contains forbidden characters"
 
         try:
-            features = json.loads(row[7]) if row[7] else []
-        except (json.JSONDecodeError, TypeError):
-            features = []
+            ext = filename.rsplit('.', 1)[1].lower()
+        except IndexError:
+            return False, "Filename has no extension"
 
-        try:
-            comparable_listings = json.loads(row[9]) if row[9] else []
-        except (json.JSONDecodeError, TypeError):
-            comparable_listings = []
-
-        try:
-            payload = json.loads(row[10]) if row[10] else {}
-        except (json.JSONDecodeError, TypeError):
-            payload = {}
-
-        return {
-            "id": row[0],
-            "title": row[1],
-            "filename": row[2],
-            "category": row[3],
-            "condition": row[4],
-            "brand": row[5],
-            "model": row[6],
-            "features": features,
-            "suggested_price": row[8],
-            "comparable_listings": comparable_listings,
-            "payload": payload,
-            "status": row[11],
-            "external_listing_id": row[12],
-            "published_at": row[13],
-            "publish_error": row[14],
-            "created_at": row[15],
-            "updated_at": row[16],
-        }
-    except Exception as e:
-        logger.error("Error fetching listing %s: %s", listing_id, e)
-        return None
-
-
-def update_listing_status(listing_id, status):
-    """Update listing status (draft, published, archived)"""
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.execute(
-                '''
-                UPDATE listings
-                SET status = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-                ''',
-                (status, listing_id),
+        if ext not in ImageValidator.ALLOWED_TYPES:
+            return False, (
+                f"Unsupported file type: {ext}. "
+                f"Allowed: {', '.join(sorted(ImageValidator.ALLOWED_TYPES))}"
             )
-            return cursor.rowcount > 0
-    except Exception as e:
-        logger.error("Error updating listing status: %s", e)
-        return False
+
+        if file_size == 0:
+            return False, "File is empty"
+
+        max_size_bytes = ImageValidator._resolve_max_size_bytes()
+        if file_size > max_size_bytes:
+            size_mb = file_size / 1024 / 1024
+            return False, f"File too large: {size_mb:.1f}MB (max {max_size_bytes // (1024 * 1024)}MB)"
+
+        return True, ""
+
+    @staticmethod
+    def validate_mime_type(mime_type: str) -> bool:
+        """Return True if the MIME type is an accepted image type."""
+        return mime_type in {'image/jpeg', 'image/png', 'image/gif'}
 
 
-def delete_listing(listing_id):
-    """Delete a listing from database"""
-    try:
-        with get_db_connection() as conn:
-            cursor = conn.execute("DELETE FROM listings WHERE id = ?", (listing_id,))
-            return cursor.rowcount > 0
-    except Exception as e:
-        logger.error("Error deleting listing: %s", e)
-        return False
+class ListingValidator:
+    """Validates generated eBay listing payloads."""
+
+    MIN_PRICE = 0.99
+    MAX_PRICE = 100_000.00
+    MAX_TITLE_LENGTH = 80
+    MAX_DESCRIPTION_LENGTH = 5_000
+
+    VALID_CONDITIONS = {
+        'NEW', 'NEW_OTHER', 'NEW_WITH_DEFECTS', 'MANUFACTURER_REFURBISHED',
+        'SELLER_REFURBISHED', 'LIKE_NEW', 'USED_EXCELLENT', 'USED_VERY_GOOD',
+        'USED_GOOD', 'USED_ACCEPTABLE', 'FOR_PARTS_OR_NOT_WORKING',
+        'REFURBISHED', 'USED_LIKE_NEW', 'NOT_SPECIFIED',
+    }
+
+    @staticmethod
+    def validate_payload(payload: dict) -> Tuple[bool, str]:
+        """
+        Validate an eBay listing payload before saving.
+
+        Returns:
+            (is_valid, error_message)
+        """
+        if not isinstance(payload, dict):
+            return False, "Payload must be a dictionary"
+
+        if 'sku' not in payload:
+            return False, "Missing SKU"
+
+        product = payload.get('product')
+        if not isinstance(product, dict):
+            return False, "Missing or invalid product section"
+
+        title = product.get('title', '').strip()
+        if not title:
+            return False, "Title is required"
+        if len(title) > ListingValidator.MAX_TITLE_LENGTH:
+            return False, (
+                f"Title too long (max {ListingValidator.MAX_TITLE_LENGTH} chars, "
+                f"got {len(title)})"
+            )
+
+        description = product.get('description', '')
+        if description and len(description) > ListingValidator.MAX_DESCRIPTION_LENGTH:
+            return False, (
+                f"Description too long (max {ListingValidator.MAX_DESCRIPTION_LENGTH} chars)"
+            )
+
+        price_data = payload.get('price')
+        if not price_data:
+            return False, "Missing price"
+
+        price_value = price_data.get('value')
+        if price_value is None:
+            return False, "Missing price value"
+
+        try:
+            price_float = float(price_value)
+        except (ValueError, TypeError) as exc:
+            return False, f"Invalid price format: {exc}"
+
+        if not (ListingValidator.MIN_PRICE <= price_float <= ListingValidator.MAX_PRICE):
+            return False, (
+                f"Price {price_float} out of range "
+                f"(${ListingValidator.MIN_PRICE} - ${ListingValidator.MAX_PRICE})"
+            )
+
+        currency = price_data.get('currency', 'USD')
+        if currency != 'USD':
+            return False, f"Only USD currency supported (got {currency})"
+
+        condition = payload.get('condition', 'USED_GOOD')
+        if condition not in ListingValidator.VALID_CONDITIONS:
+            return False, f"Invalid condition: {condition}"
+
+        return True, ""
 
 
-def get_stats():
-    """Get database statistics"""
-    try:
-        with get_db_connection() as conn:
-            total = conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0]
-            drafts = conn.execute(
-                "SELECT COUNT(*) FROM listings WHERE status = 'draft'"
-            ).fetchone()[0]
-            published = conn.execute(
-                "SELECT COUNT(*) FROM listings WHERE status = 'published'"
-            ).fetchone()[0]
-            archived = conn.execute(
-                "SELECT COUNT(*) FROM listings WHERE status = 'archived'"
-            ).fetchone()[0]
+class AnalysisValidator:
+    """Validates image analysis results from OpenAI."""
 
-        return {"total": total, "drafts": drafts, "published": published, "archived": archived}
-    except Exception as e:
-        logger.error("Error getting stats: %s", e)
-        return {"total": 0, "drafts": 0, "published": 0, "archived": 0}
+    REQUIRED_FIELDS = {'brand', 'model', 'category', 'condition'}
 
+    @staticmethod
+    def validate_analysis(analysis: dict) -> Tuple[bool, str]:
+        """Validate an image analysis structure."""
+        if not isinstance(analysis, dict):
+            return False, "Analysis must be a dictionary"
 
-def record_publish_result(listing_id, published, external_listing_id=None, error_message=None):
-    """Record publish success/failure metadata for a listing."""
-    try:
-        with get_db_connection() as conn:
-            if published:
-                cursor = conn.execute(
-                    '''
-                    UPDATE listings
-                    SET status = 'published',
-                        external_listing_id = ?,
-                        published_at = CURRENT_TIMESTAMP,
-                        publish_error = NULL,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    ''',
-                    (external_listing_id, listing_id),
-                )
-            else:
-                cursor = conn.execute(
-                    '''
-                    UPDATE listings
-                    SET publish_error = ?,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                    ''',
-                    (error_message, listing_id),
-                )
-            return cursor.rowcount > 0
-    except Exception as e:
-        logger.error("Error recording publish result: %s", e)
-        return False
+        if 'cards' in analysis:
+            if not isinstance(analysis['cards'], list):
+                return False, "Cards must be a list"
+            if not analysis['cards']:
+                return False, "Cards list is empty"
+            for i, card in enumerate(analysis['cards']):
+                ok, err = AnalysisValidator._validate_single(card)
+                if not ok:
+                    return False, f"Card {i}: {err}"
+        else:
+            ok, err = AnalysisValidator._validate_single(analysis)
+            if not ok:
+                return False, err
+
+        return True, ""
+
+    @staticmethod
+    def _validate_single(item: dict) -> Tuple[bool, str]:
+        """Validate a single item/card analysis dict."""
+        for field in AnalysisValidator.REQUIRED_FIELDS:
+            if field not in item:
+                return False, f"Missing required field: {field}"
+            value = item[field]
+            if not isinstance(value, str) or not value.strip():
+                return False, f"Field '{field}' is empty or not a string"
+
+        features = item.get('features')
+        if features is not None and not isinstance(features, (list, str)):
+            return False, "Features must be a list or string"
+
+        estimated = item.get('estimated_value_range')
+        if estimated is not None and not isinstance(estimated, str):
+            return False, "estimated_value_range must be a string"
+
+        return True, ""

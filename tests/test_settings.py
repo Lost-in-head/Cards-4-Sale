@@ -1,179 +1,190 @@
 """
-Tests for the D7 Settings routes (/settings, /api/settings) and settings_store.
+Settings store for Cards 4 Sale.
+
+Provides a portable credential/settings store that:
+  1. Tries the OS keychain via the ``keyring`` library (secure on macOS/Windows/Linux
+     with a secret service daemon running).
+  2. Falls back to a JSON file in the user data directory when no OS keychain is
+     available (e.g., headless servers, CI, fresh Linux installs without a running
+     secret-service).
+
+The fallback file lives at ``get_data_dir() / "settings.json"`` and is readable
+only by the current user (permissions are set to 0o600 on POSIX systems).
+
+Stored keys
+-----------
+Credentials (sensitive — keyring preferred):
+    OPENAI_API_KEY, EBAY_CLIENT_ID, EBAY_CLIENT_SECRET
+
+Toggles (non-sensitive booleans stored as string "True"/"False"):
+    USE_OPENAI_MOCK, USE_EBAY_MOCK, EBAY_SANDBOX
+
+Usage
+-----
+    from src.settings_store import load_all, save_all, apply_to_env
+
+    # At app startup (before config.py is evaluated):
+    apply_to_env()
+
+    # In the /api/settings POST handler:
+    save_all({"OPENAI_API_KEY": "sk-...", "USE_OPENAI_MOCK": "False"})
 """
+
 import json
+import logging
 import os
-import pytest
+import stat
+from pathlib import Path
 
-from src.app import create_app
-import src.database as db
-import src.settings_store as settings_store
+from src.paths import get_data_dir
 
+logger = logging.getLogger(__name__)
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+_SERVICE_NAME = "Cards4Sale"
 
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DATABASE_PATH", tmp_path / "test_listings.db")
-    app = create_app()
-    app.config["TESTING"] = True
-    with app.test_client() as c:
-        yield c
-
-
-@pytest.fixture(autouse=True)
-def isolated_settings(tmp_path, monkeypatch):
-    """Redirect settings store to a temp directory so tests don't pollute the
-    user's real settings file, and patch out the OS keyring to avoid errors in
-    headless CI environments."""
-    monkeypatch.setenv("CARDS4SALE_DATA_DIR", str(tmp_path))
-
-    # Stub keyring to always fail so we exercise the file fallback
-    monkeypatch.setattr(settings_store, "_keyring_get", lambda key: None)
-    monkeypatch.setattr(settings_store, "_keyring_set", lambda key, value: False)
-    monkeypatch.setattr(settings_store, "_keyring_delete", lambda key: None)
-
-    yield
-
-
-# ── settings_store unit tests ─────────────────────────────────────────────────
-
-class TestSettingsStore:
-    def test_round_trip_credential(self, tmp_path):
-        settings_store.save_credential("OPENAI_API_KEY", "sk-test123")
-        assert settings_store.get_credential("OPENAI_API_KEY") == "sk-test123"
-
-    def test_missing_credential_returns_none(self):
-        assert settings_store.get_credential("OPENAI_API_KEY") is None
-
-    def test_delete_credential(self, tmp_path):
-        settings_store.save_credential("EBAY_CLIENT_ID", "app-id-xyz")
-        settings_store.delete_credential("EBAY_CLIENT_ID")
-        assert settings_store.get_credential("EBAY_CLIENT_ID") is None
-
-    def test_save_all_filters_unknown_keys(self, tmp_path):
-        settings_store.save_all({"UNKNOWN_KEY": "should-be-ignored", "USE_EBAY_MOCK": "True"})
-        assert settings_store.get_credential("UNKNOWN_KEY") is None
-        assert settings_store.get_credential("USE_EBAY_MOCK") == "True"
-
-    def test_load_all_returns_stored_keys(self, tmp_path):
-        settings_store.save_credential("OPENAI_API_KEY", "sk-abc")
-        settings_store.save_credential("USE_OPENAI_MOCK", "True")
-        result = settings_store.load_all()
-        assert result["OPENAI_API_KEY"] == "sk-abc"
-        assert result["USE_OPENAI_MOCK"] == "True"
-
-    def test_empty_string_deletes_credential(self, tmp_path):
-        settings_store.save_credential("OPENAI_API_KEY", "sk-delete-me")
-        settings_store.save_all({"OPENAI_API_KEY": ""})
-        assert settings_store.get_credential("OPENAI_API_KEY") is None
-
-    def test_apply_to_env_sets_environ(self, monkeypatch, tmp_path):
-        settings_store.save_credential("OPENAI_API_KEY", "sk-env-test")
-        settings_store.apply_to_env()
-        assert os.environ.get("OPENAI_API_KEY") == "sk-env-test"
-
-    def test_settings_file_has_restricted_permissions(self, tmp_path):
-        import stat as stat_mod
-        import sys
-        settings_store.save_credential("OPENAI_API_KEY", "sk-perm-test")
-        path = settings_store._fallback_path()
-        assert path.exists()
-        if sys.platform != "win32":
-            mode = path.stat().st_mode
-            assert not (mode & stat_mod.S_IRGRP), "Group should not have read permission"
-            assert not (mode & stat_mod.S_IROTH), "Others should not have read permission"
+# All keys managed by this store
+CREDENTIAL_KEYS: frozenset[str] = frozenset(
+    {"OPENAI_API_KEY", "EBAY_CLIENT_ID", "EBAY_CLIENT_SECRET"}
+)
+TOGGLE_KEYS: frozenset[str] = frozenset(
+    {"USE_OPENAI_MOCK", "USE_EBAY_MOCK", "EBAY_SANDBOX"}
+)
+# eBay business policy / listing configuration keys (non-sensitive strings)
+POLICY_KEYS: frozenset[str] = frozenset(
+    {
+        "EBAY_MARKETPLACE_ID",
+        "EBAY_MERCHANT_LOCATION_KEY",
+        "EBAY_FULFILLMENT_POLICY_ID",
+        "EBAY_PAYMENT_POLICY_ID",
+        "EBAY_RETURN_POLICY_ID",
+        "EBAY_DEFAULT_CATEGORY_ID",
+        "EBAY_DEFAULT_CURRENCY",
+        "EBAY_DEFAULT_QUANTITY",
+    }
+)
+ALL_KEYS: frozenset[str] = CREDENTIAL_KEYS | TOGGLE_KEYS | POLICY_KEYS
 
 
-# ── Settings API route tests ──────────────────────────────────────────────────
+# ── Keyring helpers ─────────────────────────────────────────────────────────────
 
-class TestSettingsRoutes:
-    def test_settings_page_renders(self, client):
-        res = client.get("/settings")
-        assert res.status_code == 200
-        assert b"Settings" in res.data
+def _keyring_get(key: str) -> str | None:
+    try:
+        import keyring
 
-    def test_get_settings_returns_json(self, client):
-        res = client.get("/api/settings")
-        assert res.status_code == 200
-        data = res.get_json()
-        assert "openai_api_key_set" in data
-        assert "use_openai_mock" in data
-        assert "use_ebay_mock" in data
-        assert "ebay_sandbox" in data
+        return keyring.get_password(_SERVICE_NAME, key)
+    except Exception:
+        return None
 
-    def test_get_settings_key_not_set_by_default(self, client):
-        res = client.get("/api/settings")
-        data = res.get_json()
-        assert data["openai_api_key_set"] is False
-        assert data["ebay_client_id_set"] is False
 
-    def test_post_settings_saves_toggles(self, client):
-        res = client.post(
-            "/api/settings",
-            json={"USE_OPENAI_MOCK": True, "USE_EBAY_MOCK": False, "EBAY_SANDBOX": True},
-        )
-        assert res.status_code == 200
-        assert res.get_json()["success"] is True
-        # Verify persisted
-        assert settings_store.get_credential("USE_OPENAI_MOCK") == "True"
-        assert settings_store.get_credential("USE_EBAY_MOCK") == "False"
-        assert settings_store.get_credential("EBAY_SANDBOX") == "True"
+def _keyring_set(key: str, value: str) -> bool:
+    """Return True on success, False if no OS keychain is available."""
+    try:
+        import keyring
 
-    def test_post_settings_saves_api_key(self, client):
-        res = client.post("/api/settings", json={"OPENAI_API_KEY": "sk-stored-key"})
-        assert res.status_code == 200
-        assert settings_store.get_credential("OPENAI_API_KEY") == "sk-stored-key"
+        keyring.set_password(_SERVICE_NAME, key, value)
+        return True
+    except Exception:
+        return False
 
-    def test_get_settings_after_save_shows_key_set(self, client):
-        client.post("/api/settings", json={"OPENAI_API_KEY": "sk-visible"})
-        res = client.get("/api/settings")
-        data = res.get_json()
-        assert data["openai_api_key_set"] is True
-        # Preview should be masked — not the full key
-        assert data["openai_api_key_preview"] != "sk-visible"
-        assert "sk-" in data["openai_api_key_preview"]
 
-    def test_post_settings_empty_body_returns_success(self, client):
-        res = client.post("/api/settings", json={})
-        assert res.status_code == 200
-        assert res.get_json()["success"] is True
+def _keyring_delete(key: str) -> None:
+    try:
+        import keyring
 
-    def test_test_openai_returns_mock_status_in_mock_mode(self, client, monkeypatch):
-        monkeypatch.setenv("USE_OPENAI_MOCK", "True")
-        # Reload config so mock mode is active
-        import importlib, src.config as cfg
-        monkeypatch.setattr(cfg, "USE_OPENAI_MOCK", True)
-        res = client.post("/api/settings/test-openai")
-        assert res.status_code == 200
-        data = res.get_json()
-        assert data["success"] is True
-        assert data["mode"] == "mock"
+        keyring.delete_password(_SERVICE_NAME, key)
+    except Exception:
+        pass
 
-    def test_test_ebay_returns_mock_status_in_mock_mode(self, client, monkeypatch):
-        import src.config as cfg
-        monkeypatch.setattr(cfg, "USE_EBAY_MOCK", True)
-        res = client.post("/api/settings/test-ebay")
-        assert res.status_code == 200
-        data = res.get_json()
-        assert data["success"] is True
-        assert data["mode"] == "mock"
 
-    def test_test_openai_no_key_returns_mock_mode(self, client, monkeypatch):
-        import src.config as cfg
-        monkeypatch.setattr(cfg, "USE_OPENAI_MOCK", False)
-        monkeypatch.setattr(cfg, "OPENAI_API_KEY", None)
-        res = client.post("/api/settings/test-openai")
-        data = res.get_json()
-        assert data["success"] is True
-        assert data["mode"] == "mock"
+# ── File fallback helpers ───────────────────────────────────────────────────────
 
-    def test_test_ebay_no_credentials_returns_mock_mode(self, client, monkeypatch):
-        import src.config as cfg
-        monkeypatch.setattr(cfg, "USE_EBAY_MOCK", False)
-        monkeypatch.setattr(cfg, "EBAY_CLIENT_ID", None)
-        monkeypatch.setattr(cfg, "EBAY_CLIENT_SECRET", None)
-        res = client.post("/api/settings/test-ebay")
-        data = res.get_json()
-        assert data["success"] is True
-        assert data["mode"] == "mock"
+def _fallback_path() -> Path:
+    return get_data_dir() / "settings.json"
+
+
+def _load_fallback() -> dict:
+    path = _fallback_path()
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("Could not read settings file %s: %s", path, exc)
+    return {}
+
+
+def _save_fallback(data: dict) -> None:
+    path = _fallback_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Restrict file permissions on POSIX (owner read/write only)
+    try:
+        path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass  # Windows or permission error — not critical
+
+
+# ── Public API ─────────────────────────────────────────────────────────────────
+
+def get_credential(key: str) -> str | None:
+    """Return a stored credential, or None if not set."""
+    value = _keyring_get(key)
+    if value is not None:
+        return value
+    return _load_fallback().get(key)
+
+
+def save_credential(key: str, value: str) -> None:
+    """Persist a credential to the OS keychain if available, else to the fallback file."""
+    if not _keyring_set(key, value):
+        data = _load_fallback()
+        data[key] = value
+        _save_fallback(data)
+        logger.debug("Saved %s to fallback settings file", key)
+
+
+def delete_credential(key: str) -> None:
+    """Remove a stored credential from both keychain and fallback file."""
+    _keyring_delete(key)
+    data = _load_fallback()
+    if key in data:
+        del data[key]
+        _save_fallback(data)
+
+
+def load_all() -> dict:
+    """Return all currently stored settings as a plain dict."""
+    result = {}
+    for key in ALL_KEYS:
+        val = get_credential(key)
+        if val is not None:
+            result[key] = val
+    return result
+
+
+def save_all(settings: dict) -> None:
+    """
+    Save a dict of settings.  Only keys present in ALL_KEYS are persisted;
+    unknown keys are silently ignored.
+    """
+    for key, value in settings.items():
+        if key in ALL_KEYS:
+            if not value:
+                # Treat empty string / None as "delete this credential"
+                delete_credential(key)
+            else:
+                save_credential(key, str(value))
+
+
+def apply_to_env() -> None:
+    """
+    Load all stored settings and push them into ``os.environ``.
+
+    Call this **before** importing ``src.config`` so that the loaded values
+    take precedence over the ``.env`` file.
+    """
+    stored = load_all()
+    for key, value in stored.items():
+        os.environ.setdefault(key, value)
+        logger.debug("Applied stored setting %s to environment", key)
+    if stored:
+        logger.info("Applied %d stored setting(s) from settings store", len(stored))

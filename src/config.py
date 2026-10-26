@@ -1,101 +1,199 @@
 """
-Environment configuration
-Load API keys and settings from .env file
+Tests for the D7 Settings routes (/settings, /api/settings) and settings_store.
 """
+import json
 import os
-from dotenv import load_dotenv
 
-load_dotenv()
+import pytest
 
-
-def _parse_bool(value: str | None, default: bool = False) -> bool:
-    """Consistently parse environment boolean strings."""
-    if value is None:
-        return default
-    return value.lower() in ("true", "1", "yes", "on")
+from src.app import create_app
+import src.database as db
+import src.settings_store as settings_store
 
 
-# OpenAI
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = "gpt-4o-mini"  # Vision-enabled model
+# ── Fixtures ────────────────────────────────────────────────────────────────
 
-# eBay
-EBAY_CLIENT_ID = os.getenv("EBAY_CLIENT_ID")
-EBAY_CLIENT_SECRET = os.getenv("EBAY_CLIENT_SECRET")
-EBAY_SANDBOX = _parse_bool(os.getenv("EBAY_SANDBOX"), default=True)
-EBAY_OAUTH_ENDPOINT = (
-    "https://api.sandbox.ebay.com/identity/v1/oauth2/token"
-    if EBAY_SANDBOX
-    else "https://api.ebay.com/identity/v1/oauth2/token"
-)
-EBAY_API_ENDPOINT = (
-    "https://api.sandbox.ebay.com"
-    if EBAY_SANDBOX
-    else "https://api.ebay.com"
-)
-
-# eBay business policies and listing defaults
-# These are required for the full publish flow (create offer + publish offer).
-EBAY_MARKETPLACE_ID = os.getenv("EBAY_MARKETPLACE_ID", "EBAY_US")
-EBAY_MERCHANT_LOCATION_KEY = os.getenv("EBAY_MERCHANT_LOCATION_KEY", "")
-EBAY_FULFILLMENT_POLICY_ID = os.getenv("EBAY_FULFILLMENT_POLICY_ID", "")
-EBAY_PAYMENT_POLICY_ID = os.getenv("EBAY_PAYMENT_POLICY_ID", "")
-EBAY_RETURN_POLICY_ID = os.getenv("EBAY_RETURN_POLICY_ID", "")
-EBAY_DEFAULT_CATEGORY_ID = os.getenv("EBAY_DEFAULT_CATEGORY_ID", "")
-EBAY_DEFAULT_CURRENCY = os.getenv("EBAY_DEFAULT_CURRENCY", "USD")
-EBAY_DEFAULT_QUANTITY = int(os.getenv("EBAY_DEFAULT_QUANTITY", "1"))
-
-# App settings
-DEBUG = _parse_bool(os.getenv("DEBUG"), default=False)
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-
-# Mock APIs — default to mock so the app works out-of-the-box without credentials.
-# Set USE_OPENAI_MOCK=False and USE_EBAY_MOCK=False in .env to use real APIs.
-USE_OPENAI_MOCK = _parse_bool(os.getenv("USE_OPENAI_MOCK"), default=True)
-USE_EBAY_MOCK = _parse_bool(os.getenv("USE_EBAY_MOCK"), default=True)
-
-# Business logic thresholds
-HIGH_VALUE_THRESHOLD = float(os.getenv("HIGH_VALUE_THRESHOLD", "20.0"))
-
-# Upload configuration
-MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "16"))
-MAX_CONTENT_LENGTH = MAX_UPLOAD_SIZE_MB * 1024 * 1024
-
-# Web UI Config
-from src.paths import get_upload_dir
-UPLOAD_FOLDER = get_upload_dir()
-ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "gif"}
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DATABASE_PATH", tmp_path / "test_listings.db")
+    app = create_app()
+    app.config["TESTING"] = True
+    with app.test_client() as c:
+        yield c
 
 
-def validate_config() -> None:
-    """Validate critical configuration on startup; raise ValueError if misconfigured."""
-    if not USE_OPENAI_MOCK and not OPENAI_API_KEY:
-        raise ValueError("OPENAI_API_KEY is required when USE_OPENAI_MOCK=False")
-    if not USE_EBAY_MOCK and not (EBAY_CLIENT_ID and EBAY_CLIENT_SECRET):
-        raise ValueError("EBAY_CLIENT_ID and EBAY_CLIENT_SECRET are required when USE_EBAY_MOCK=False")
+@pytest.fixture(autouse=True)
+def isolated_settings(tmp_path, monkeypatch):
+    """Redirect settings store to a temp directory so tests don't pollute the
+    user's real settings file, and patch out the OS keyring to avoid errors in
+    headless CI environments."""
+    monkeypatch.setenv("CARDS4SALE_DATA_DIR", str(tmp_path))
 
-    # Validate positive thresholds and content limits.
-    if HIGH_VALUE_THRESHOLD < 0:
-        raise ValueError("HIGH_VALUE_THRESHOLD must be non-negative")
-    if MAX_UPLOAD_SIZE_MB <= 0:
-        raise ValueError("MAX_UPLOAD_SIZE_MB must be greater than zero")
-    if EBAY_DEFAULT_QUANTITY <= 0:
-        raise ValueError("EBAY_DEFAULT_QUANTITY must be greater than zero")
+    # Stub keyring to always fail so we exercise the file fallback
+    monkeypatch.setattr(settings_store, "_keyring_get", lambda key: None)
+    monkeypatch.setattr(settings_store, "_keyring_set", lambda key, value: False)
+    monkeypatch.setattr(settings_store, "_keyring_delete", lambda key: None)
+
+    yield
 
 
-__all__ = [
-    "OPENAI_API_KEY",
-    "OPENAI_MODEL",
-    "EBAY_CLIENT_ID",
-    "EBAY_CLIENT_SECRET",
-    "USE_OPENAI_MOCK",
-    "USE_EBAY_MOCK",
-    "EBAY_SANDBOX",
-    "DEBUG",
-    "LOG_LEVEL",
-    "HIGH_VALUE_THRESHOLD",
-    "MAX_CONTENT_LENGTH",
-    "UPLOAD_FOLDER",
-    "ALLOWED_EXTENSIONS",
-    "validate_config",
-]
+# ── settings_store unit tests ─────────────────────────────────────────────────
+
+class TestSettingsStore:
+    def test_round_trip_credential(self, tmp_path):
+        settings_store.save_credential("OPENAI_API_KEY", "sk-test123")
+        assert settings_store.get_credential("OPENAI_API_KEY") == "sk-test123"
+
+    def test_missing_credential_returns_none(self):
+        assert settings_store.get_credential("OPENAI_API_KEY") is None
+
+    def test_delete_credential(self, tmp_path):
+        settings_store.save_credential("EBAY_CLIENT_ID", "app-id-xyz")
+        settings_store.delete_credential("EBAY_CLIENT_ID")
+        assert settings_store.get_credential("EBAY_CLIENT_ID") is None
+
+    def test_save_all_filters_unknown_keys(self, tmp_path):
+        settings_store.save_all({"UNKNOWN_KEY": "should-be-ignored", "USE_EBAY_MOCK": "True"})
+        assert settings_store.get_credential("UNKNOWN_KEY") is None
+        assert settings_store.get_credential("USE_EBAY_MOCK") == "True"
+
+    def test_load_all_returns_stored_keys(self, tmp_path):
+        settings_store.save_credential("OPENAI_API_KEY", "sk-abc")
+        settings_store.save_credential("USE_OPENAI_MOCK", "True")
+        result = settings_store.load_all()
+        assert result["OPENAI_API_KEY"] == "sk-abc"
+        assert result["USE_OPENAI_MOCK"] == "True"
+
+    def test_empty_string_deletes_credential(self, tmp_path):
+        settings_store.save_credential("OPENAI_API_KEY", "sk-delete-me")
+        settings_store.save_all({"OPENAI_API_KEY": ""})
+        assert settings_store.get_credential("OPENAI_API_KEY") is None
+
+    def test_apply_to_env_sets_environ(self, monkeypatch, tmp_path):
+        settings_store.save_credential("OPENAI_API_KEY", "sk-env-test")
+        settings_store.apply_to_env()
+        assert os.environ.get("OPENAI_API_KEY") == "sk-env-test"
+
+    def test_settings_file_has_restricted_permissions(self, tmp_path):
+        import stat as stat_mod
+        import sys
+
+        settings_store.save_credential("OPENAI_API_KEY", "sk-perm-test")
+        path = settings_store._fallback_path()
+        assert path.exists()
+        if sys.platform != "win32":
+            mode = path.stat().st_mode
+            assert not (mode & stat_mod.S_IRGRP), "Group should not have read permission"
+            assert not (mode & stat_mod.S_IROTH), "Others should not have read permission"
+
+
+# ── Settings API route tests ──────────────────────────────────────────────────
+
+class TestSettingsRoutes:
+    def test_settings_page_renders(self, client):
+        res = client.get("/settings")
+        assert res.status_code == 200
+        assert b"Settings" in res.data
+
+    def test_get_settings_returns_json(self, client):
+        res = client.get("/api/settings")
+        assert res.status_code == 200
+        data = res.get_json()
+        assert "openai_api_key_set" in data
+        assert "use_openai_mock" in data
+        assert "use_ebay_mock" in data
+        assert "ebay_sandbox" in data
+
+    def test_get_settings_key_not_set_by_default(self, client):
+        res = client.get("/api/settings")
+        data = res.get_json()
+        assert data["openai_api_key_set"] is False
+        assert data["ebay_client_id_set"] is False
+
+    def test_post_settings_saves_toggles(self, client):
+        res = client.post(
+            "/api/settings",
+            json={"USE_OPENAI_MOCK": True, "USE_EBAY_MOCK": False, "EBAY_SANDBOX": True},
+        )
+        assert res.status_code == 200
+        assert res.get_json()["success"] is True
+        # Verify persisted
+        assert settings_store.get_credential("USE_OPENAI_MOCK") == "True"
+        assert settings_store.get_credential("USE_EBAY_MOCK") == "False"
+        assert settings_store.get_credential("EBAY_SANDBOX") == "True"
+
+    def test_post_settings_saves_api_key(self, client):
+        res = client.post("/api/settings", json={"OPENAI_API_KEY": "sk-stored-key"})
+        assert res.status_code == 200
+        assert settings_store.get_credential("OPENAI_API_KEY") == "sk-stored-key"
+
+    def test_get_settings_after_save_shows_key_set(self, client):
+        client.post("/api/settings", json={"OPENAI_API_KEY": "sk-visible"})
+        res = client.get("/api/settings")
+        data = res.get_json()
+        assert data["openai_api_key_set"] is True
+        # Preview should be masked — not the full key
+        assert data["openai_api_key_preview"] != "sk-visible"
+        assert "sk-" in data["openai_api_key_preview"]
+
+    def test_post_settings_empty_body_returns_success(self, client):
+        res = client.post("/api/settings", json={})
+        assert res.status_code == 200
+        assert res.get_json()["success"] is True
+
+    def test_test_openai_returns_mock_status_in_mock_mode(self, client, monkeypatch):
+        monkeypatch.setenv("USE_OPENAI_MOCK", "True")
+        # Reload config so mock mode is active
+        import importlib
+        import src.config as cfg
+
+        monkeypatch.setattr(cfg, "USE_OPENAI_MOCK", True)
+        res = client.post("/api/settings/test-openai")
+        assert res.status_code == 200
+        data = res.get_json()
+        assert data["success"] is True
+        assert data["mode"] == "mock"
+
+    def test_test_ebay_returns_mock_status_in_mock_mode(self, client, monkeypatch):
+        import src.config as cfg
+
+        monkeypatch.setattr(cfg, "USE_EBAY_MOCK", True)
+        res = client.post("/api/settings/test-ebay")
+        assert res.status_code == 200
+        data = res.get_json()
+        assert data["success"] is True
+        assert data["mode"] == "mock"
+
+    def test_test_openai_no_key_returns_mock_mode(self, client, monkeypatch):
+        import src.config as cfg
+
+        monkeypatch.setattr(cfg, "USE_OPENAI_MOCK", False)
+        monkeypatch.setattr(cfg, "OPENAI_API_KEY", None)
+        res = client.post("/api/settings/test-openai")
+        data = res.get_json()
+        assert data["success"] is True
+        assert data["mode"] == "mock"
+
+    def test_test_ebay_no_credentials_returns_mock_mode(self, client, monkeypatch):
+        import src.config as cfg
+
+        monkeypatch.setattr(cfg, "USE_EBAY_MOCK", False)
+        monkeypatch.setattr(cfg, "EBAY_CLIENT_ID", None)
+        monkeypatch.setattr(cfg, "EBAY_CLIENT_SECRET", None)
+        res = client.post("/api/settings/test-ebay")
+        data = res.get_json()
+        assert data["success"] is True
+        assert data["mode"] == "mock"
+
+    def test_post_policy_settings_are_persisted(self, client):
+        payload = {
+            "EBAY_MARKETPLACE_ID": "EBAY_US",
+            "EBAY_DEFAULT_CURRENCY": "USD",
+            "EBAY_DEFAULT_QUANTITY": "2",
+        }
+        res = client.post("/api/settings", json=payload)
+        assert res.status_code == 200
+        persisted = settings_store.load_all()
+        assert persisted["EBAY_MARKETPLACE_ID"] == "EBAY_US"
+        assert persisted["EBAY_DEFAULT_CURRENCY"] == "USD"
+        assert persisted["EBAY_DEFAULT_QUANTITY"] == "2"
